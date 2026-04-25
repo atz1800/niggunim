@@ -22,4 +22,4 @@ npm run dev
 
 ## פריסה
 
-נעשית אוטומטית דרך GitHub Actions בכל push ל-`main`.test trigger
+נעשית אוטומטית דרך GitHub Actions בכל push ל-`main`.
