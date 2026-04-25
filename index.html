@@ -2,6 +2,16 @@
 <html lang="he" dir="rtl">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // GitHub Pages SPA — שחזור URL אחרי redirect מ-404.html
+      (function() {
+        var p = window.location.search.match(/[?&]p=([^&]*)/);
+        if (p) {
+          var path = decodeURIComponent(p[1].replace(/~and~/g, '&'));
+          window.history.replaceState(null, null, '/' + path);
+        }
+      })();
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>יומן הניגונים שלי</title>
 
@@ -31,7 +41,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-    <script type="module" crossorigin src="/niggunim/assets/index-Cn59IXgl.js"></script>
+    <script type="module" crossorigin src="/niggunim/assets/index-CVm7_9B4.js"></script>
     <link rel="stylesheet" crossorigin href="/niggunim/assets/index-Y1C6kNof.css">
   </head>
   <body>
