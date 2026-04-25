@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /niggunim/
+Sitemap: https://atz1800.github.io/niggunim/sitemap.xml

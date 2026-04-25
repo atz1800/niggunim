@@ -1,0 +1,11 @@
+{
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "storage": [
+    {
+      "bucket": "niggunim-a7f32.firebasestorage.app",
+      "rules": "storage.rules"
+    }
+  ]
+}

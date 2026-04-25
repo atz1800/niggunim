@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+Thumbs.db
+
+# סקריפטים חד-פעמיים לניהול
+write_*.cjs
+fix_*.cjs
+set-cors*.mjs
+cors.json
+check-storage.ps1
+find-bucket.mjs
+init-storage.mjs
+provision-storage.mjs
+create_og.cjs
+
+# Claude settings
+.claude/

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#1e1c2e"/>
+      <stop offset="100%" stop-color="#12111a"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="60%" r="50%">
+      <stop offset="0%" stop-color="#d4af37" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#d4af37" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="50" cy="50" r="50" fill="url(#bg)"/>
+  <!-- Glow -->
+  <circle cx="50" cy="50" r="50" fill="url(#glow)"/>
+  <!-- Musical note ♪ -->
+  <!-- Stem -->
+  <rect x="56" y="18" width="7" height="52" rx="3.5" fill="#d4af37"/>
+  <!-- Flag -->
+  <path d="M63 18 Q85 28 78 46 Q70 34 63 38 Z" fill="#d4af37"/>
+  <!-- Note head -->
+  <ellipse cx="46" cy="68" rx="14" ry="10" transform="rotate(-20 46 68)" fill="#d4af37"/>
+</svg>
