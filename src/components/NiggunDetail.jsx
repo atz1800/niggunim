@@ -13,80 +13,21 @@ function getAudioFiles(niggun) {
 }
 
 
-const MIME_MAP = {
-  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac',
-  wav: 'audio/wav', ogg: 'audio/ogg', flac: 'audio/flac',
-  wma: 'audio/x-ms-wma', opus: 'audio/ogg; codecs=opus', webm: 'audio/webm',
-}
-
-async function fetchAudioBlob(fileId, fileName, token) {
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-    { headers: { Authorization: `Bearer ${token}` } }
-  )
-  if (res.status === 401) throw new Error('TOKEN_EXPIRED')
-  if (!res.ok) throw new Error('FETCH_FAILED')
-  const blob = await res.blob()
-  const ext = (fileName || '').split('.').pop().toLowerCase()
-  const mime = (blob.type && blob.type !== 'application/octet-stream')
-    ? blob.type
-    : (MIME_MAP[ext] || 'audio/mp4')
-  return new Blob([blob], { type: mime })
-}
-
-// נגן שמע ל-Google Drive — מוריד blob עם הטוקן; מרענן אוטומטית אם פג
-function DriveAudioPlayer({ fileId, fileName, getDriveToken }) {
-  const [src, setSrc] = React.useState(null)
-  const [loading, setLoading] = React.useState(true)
+// נגן ישיר ל-URL ציבורי של Drive — ללא OAuth, ללא המתנה לטעינה
+function DriveAudioPlayer({ url, name }) {
   const [failed, setFailed] = React.useState(false)
+  const driveId = url?.match(/[?&]id=([^&]+)/)?.[1]
 
-  React.useEffect(() => {
-    let objectUrl = null
-    async function load() {
-      try {
-        let token = localStorage.getItem('driveToken')
-        if (!token) {
-          token = await getDriveToken(true)
-          if (!token) throw new Error('NO_TOKEN')
-        }
-        let blob
-        try {
-          blob = await fetchAudioBlob(fileId, fileName, token)
-        } catch (err) {
-          if (err.message === 'TOKEN_EXPIRED') {
-            token = await getDriveToken(true)
-            if (!token) throw new Error('NO_TOKEN')
-            blob = await fetchAudioBlob(fileId, fileName, token)
-          } else {
-            throw err
-          }
-        }
-        objectUrl = URL.createObjectURL(blob)
-        setSrc(objectUrl)
-      } catch {
-        setFailed(true)
-      } finally {
-        setLoading(false)
-      }
-    }
-    load()
-    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl) }
-  }, [fileId, fileName])
-
-  if (loading) return <div className="drive-loading">⏳ טוען הקלטה...</div>
-
-  if (failed || !src) return (
-    <a href={`https://drive.google.com/file/d/${fileId}/view`}
-       target="_blank" rel="noreferrer"
-       className="drive-open-link">
+  if (failed || !url) return (
+    <a href={driveId ? `https://drive.google.com/file/d/${driveId}/view` : '#'}
+       target="_blank" rel="noreferrer" className="drive-open-link">
       🔗 פתח ב-Google Drive
     </a>
   )
 
   return (
     <div dir="ltr">
-      <audio controls className="audio-player" src={src}
-             onError={() => setFailed(true)} />
+      <audio controls className="audio-player" src={url} onError={() => setFailed(true)} />
     </div>
   )
 }
@@ -322,18 +263,12 @@ export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpd
         <div className="detail-section">
           <div className="detail-section-label">הקלטות</div>
           <div className="audio-players-list">
-            {displayAudioFiles.map((f, i) => {
-              const driveId = f.fileId || f.url?.match(/[?&]id=([^&]+)/)?.[1]
-              return (
-                <div key={i} className="audio-player-item">
-                  <div className="audio-player-name">🎵 {f.name || `הקלטה ${i + 1}`}</div>
-                  {driveId
-                    ? <DriveAudioPlayer key={driveId} fileId={driveId} fileName={f.name} getDriveToken={getDriveToken} />
-                    : <div dir="ltr"><audio controls className="audio-player" src={f.url} /></div>
-                  }
-                </div>
-              )
-            })}
+            {displayAudioFiles.map((f, i) => (
+              <div key={i} className="audio-player-item">
+                <div className="audio-player-name">🎵 {f.name || `הקלטה ${i + 1}`}</div>
+                <DriveAudioPlayer url={f.url} name={f.name} />
+              </div>
+            ))}
           </div>
         </div>
       )}
