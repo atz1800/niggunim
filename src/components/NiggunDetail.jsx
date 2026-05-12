@@ -13,12 +13,81 @@ function getAudioFiles(niggun) {
 }
 
 
-// נגן ישיר ל-URL ציבורי של Drive — ללא OAuth, ללא המתנה לטעינה
-function DriveAudioPlayer({ url, name }) {
+const MIME_MAP = {
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac',
+  wav: 'audio/wav', ogg: 'audio/ogg', flac: 'audio/flac',
+  wma: 'audio/x-ms-wma', opus: 'audio/ogg; codecs=opus', webm: 'audio/webm',
+}
+
+function blobToObjectUrl(blob, fileName) {
+  const ext = (fileName || '').split('.').pop().toLowerCase()
+  const mime = (blob.type && blob.type !== 'application/octet-stream')
+    ? blob.type : (MIME_MAP[ext] || 'audio/mp4')
+  return URL.createObjectURL(new Blob([blob], { type: mime }))
+}
+
+// ניסיון 1 — API key (קבצים ציבוריים, ללא auth, מהיר)
+// ניסיון 2 — OAuth Bearer token (fallback, מרענן אוטומטית אם פג)
+function DriveAudioPlayer({ url, name, getDriveToken }) {
+  const [src, setSrc] = React.useState(null)
+  const [loading, setLoading] = React.useState(true)
   const [failed, setFailed] = React.useState(false)
   const driveId = url?.match(/[?&]id=([^&]+)/)?.[1]
+  const apiKey = import.meta.env.VITE_FIREBASE_API_KEY
 
-  if (failed || !url) return (
+  React.useEffect(() => {
+    if (!driveId) { setFailed(true); setLoading(false); return }
+    let objectUrl = null
+
+    async function load() {
+      // ניסיון 1: API key — אין צורך ב-OAuth
+      if (apiKey) {
+        try {
+          const res = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${driveId}?alt=media&key=${apiKey}`
+          )
+          if (res.ok) {
+            objectUrl = blobToObjectUrl(await res.blob(), name)
+            setSrc(objectUrl); setLoading(false); return
+          }
+        } catch {}
+      }
+
+      // ניסיון 2: OAuth Bearer token
+      try {
+        let token = localStorage.getItem('driveToken')
+        if (!token) token = await getDriveToken(true)
+        if (!token) throw new Error('NO_TOKEN')
+
+        let res = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${driveId}?alt=media`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        )
+        if (res.status === 401) {
+          token = await getDriveToken(true)
+          if (!token) throw new Error('NO_TOKEN')
+          res = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${driveId}?alt=media`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          )
+        }
+        if (!res.ok) throw new Error('FAILED')
+        objectUrl = blobToObjectUrl(await res.blob(), name)
+        setSrc(objectUrl)
+      } catch {
+        setFailed(true)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    load()
+    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl) }
+  }, [driveId, name])
+
+  if (loading) return <div className="drive-loading">⏳ טוען הקלטה...</div>
+
+  if (failed || !src) return (
     <a href={driveId ? `https://drive.google.com/file/d/${driveId}/view` : '#'}
        target="_blank" rel="noreferrer" className="drive-open-link">
       🔗 פתח ב-Google Drive
@@ -27,7 +96,7 @@ function DriveAudioPlayer({ url, name }) {
 
   return (
     <div dir="ltr">
-      <audio controls className="audio-player" src={url} onError={() => setFailed(true)} />
+      <audio controls className="audio-player" src={src} onError={() => setFailed(true)} />
     </div>
   )
 }
@@ -266,7 +335,7 @@ export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpd
             {displayAudioFiles.map((f, i) => (
               <div key={i} className="audio-player-item">
                 <div className="audio-player-name">🎵 {f.name || `הקלטה ${i + 1}`}</div>
-                <DriveAudioPlayer url={f.url} name={f.name} />
+                <DriveAudioPlayer url={f.url} name={f.name} getDriveToken={getDriveToken} />
               </div>
             ))}
           </div>
