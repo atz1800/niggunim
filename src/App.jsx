@@ -5,6 +5,7 @@ import { db, auth, googleProvider } from './firebase'
 import NiggunCard from './components/NiggunCard'
 import AddNiggun from './components/AddNiggun'
 import NiggunDetail from './components/NiggunDetail'
+import SplashScreen from './components/SplashScreen'
 
 const MOODS = ['הכל', 'שבת', 'שמח', 'עצוב', 'מהיר', 'איטי', 'דבקות', 'תפילה', 'אחר']
 
@@ -51,6 +52,7 @@ function AppHeader({ user, onLogout, onAdd, showAdd }) {
 }
 
 export default function App() {
+  const [splashDone, setSplashDone] = useState(false)
   const [user, setUser] = useState(undefined)
   const [niggunim, setNiggunim] = useState([])
   const [loading, setLoading] = useState(true)
@@ -59,7 +61,6 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [moodFilter, setMoodFilter] = useState('הכל')
   const [toast, setToast] = useState({ msg: '', type: '' })
-  // Google Drive access token - saved in sessionStorage between page loads
   const [driveToken, setDriveToken] = useState(() => localStorage.getItem('driveToken') || null)
 
   useEffect(() => {
@@ -100,10 +101,13 @@ export default function App() {
 
   async function getDriveToken(force = false) {
     if (!force && driveToken) return driveToken
-    // טוקן פג תוקף או כפוי — נקה ובקש חדש
     saveDriveToken(null)
     try {
-      const result = await signInWithPopup(auth, googleProvider)
+      // login_hint מונע הצגת בוחר חשבון כשהמשתמש כבר מחובר
+      const provider = new GoogleAuthProvider()
+      provider.addScope('https://www.googleapis.com/auth/drive.file')
+      if (user?.email) provider.setCustomParameters({ login_hint: user.email })
+      const result = await signInWithPopup(auth, provider)
       const credential = GoogleAuthProvider.credentialFromResult(result)
       const token = credential?.accessToken || null
       saveDriveToken(token)
@@ -142,6 +146,10 @@ export default function App() {
     const matchMood = moodFilter === 'הכל' || n.mood === moodFilter
     return matchSearch && matchMood
   })
+
+  if (!splashDone) {
+    return <SplashScreen onDone={() => setSplashDone(true)} />
+  }
 
   if (user === undefined) {
     return <div className="loading"><div className="spinner" />טוען...</div>

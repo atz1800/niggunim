@@ -13,8 +13,29 @@ function getAudioFiles(niggun) {
 }
 
 
-// נגן שמע ל-Google Drive — מוריד blob עם הטוקן; אם פג תוקף — לינק בשקט
-function DriveAudioPlayer({ fileId, fileName }) {
+const MIME_MAP = {
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac',
+  wav: 'audio/wav', ogg: 'audio/ogg', flac: 'audio/flac',
+  wma: 'audio/x-ms-wma', opus: 'audio/ogg; codecs=opus', webm: 'audio/webm',
+}
+
+async function fetchAudioBlob(fileId, fileName, token) {
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  )
+  if (res.status === 401) throw new Error('TOKEN_EXPIRED')
+  if (!res.ok) throw new Error('FETCH_FAILED')
+  const blob = await res.blob()
+  const ext = (fileName || '').split('.').pop().toLowerCase()
+  const mime = (blob.type && blob.type !== 'application/octet-stream')
+    ? blob.type
+    : (MIME_MAP[ext] || 'audio/mp4')
+  return new Blob([blob], { type: mime })
+}
+
+// נגן שמע ל-Google Drive — מוריד blob עם הטוקן; מרענן אוטומטית אם פג
+function DriveAudioPlayer({ fileId, fileName, getDriveToken }) {
   const [src, setSrc] = React.useState(null)
   const [loading, setLoading] = React.useState(true)
   const [failed, setFailed] = React.useState(false)
@@ -22,21 +43,25 @@ function DriveAudioPlayer({ fileId, fileName }) {
   React.useEffect(() => {
     let objectUrl = null
     async function load() {
-      const token = localStorage.getItem('driveToken')
-      if (!token) { setFailed(true); setLoading(false); return }
       try {
-        const res = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        )
-        if (!res.ok) { setFailed(true); setLoading(false); return }
-        const blob = await res.blob()
-        const ext = (fileName || '').split('.').pop().toLowerCase()
-        const mimeMap = { mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav', ogg: 'audio/ogg' }
-        const mime = (blob.type && blob.type !== 'application/octet-stream')
-          ? blob.type
-          : (mimeMap[ext] || 'audio/mp4')
-        objectUrl = URL.createObjectURL(new Blob([blob], { type: mime }))
+        let token = localStorage.getItem('driveToken')
+        if (!token) {
+          token = await getDriveToken(true)
+          if (!token) throw new Error('NO_TOKEN')
+        }
+        let blob
+        try {
+          blob = await fetchAudioBlob(fileId, fileName, token)
+        } catch (err) {
+          if (err.message === 'TOKEN_EXPIRED') {
+            token = await getDriveToken(true)
+            if (!token) throw new Error('NO_TOKEN')
+            blob = await fetchAudioBlob(fileId, fileName, token)
+          } else {
+            throw err
+          }
+        }
+        objectUrl = URL.createObjectURL(blob)
         setSrc(objectUrl)
       } catch {
         setFailed(true)
@@ -92,7 +117,7 @@ export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpd
 
   function handleNewFilesSelect(rawFiles) {
     const valid = Array.from(rawFiles).filter(f =>
-      f.type.startsWith('audio/') || /\.(mp3|m4a|wav|ogg|aac)$/i.test(f.name)
+      f.type.startsWith('audio/') || /\.(mp3|m4a|wav|ogg|aac|flac|wma|opus|webm)$/i.test(f.name)
     )
     const entries = valid.map(file => ({
       id: nextId++, file, status: 'uploading', progress: 0, result: null
@@ -303,7 +328,7 @@ export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpd
                 <div key={i} className="audio-player-item">
                   <div className="audio-player-name">🎵 {f.name || `הקלטה ${i + 1}`}</div>
                   {driveId
-                    ? <DriveAudioPlayer key={driveId} fileId={driveId} fileName={f.name} />
+                    ? <DriveAudioPlayer key={driveId} fileId={driveId} fileName={f.name} getDriveToken={getDriveToken} />
                     : <div dir="ltr"><audio controls className="audio-player" src={f.url} /></div>
                   }
                 </div>

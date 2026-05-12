@@ -32,11 +32,11 @@ export default function AddNiggun({ uid, getDriveToken, onClose, onAdded }) {
   }
 
   function handleFilesSelect(rawFiles) {
-    const allowed = /\.(mp3|m4a|wav|ogg|aac)$/i
+    const allowed = /\.(mp3|m4a|wav|ogg|aac|flac|wma|opus|webm)$/i
     const valid = Array.from(rawFiles).filter(f =>
       f.type.startsWith('audio/') || allowed.test(f.name)
     )
-    if (!valid.length) { setError('קבצי שמע בלבד (MP3, M4A, WAV)'); return }
+    if (!valid.length) { setError('קבצי שמע בלבד (MP3, M4A, WAV, AAC, FLAC, OPUS ועוד)'); return }
     setError('')
     const entries = valid.map(file => ({
       id: nextId++, file, status: 'uploading', progress: 0, result: null
