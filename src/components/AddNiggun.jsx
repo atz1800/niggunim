@@ -15,7 +15,7 @@ function getHebrewDate() {
 
 let nextId = 1
 
-export default function AddNiggun({ uid, getDriveToken, onClose, onAdded }) {
+export default function AddNiggun({ uid, onClose, onAdded }) {
   const [form, setForm] = useState({
     name: '', chords: '', story: '', mood: '', hebrewDate: getHebrewDate(),
   })

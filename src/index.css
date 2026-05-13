@@ -666,6 +666,32 @@ textarea.form-input {
   display: block;
 }
 
+/* AudioPlayer — migrate button */
+.btn-migrate {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  background: linear-gradient(135deg, #2a2a4a, #1e2d4f);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  color: var(--accent);
+  font-size: 0.9rem;
+  font-family: 'Heebo', sans-serif;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+  width: 100%;
+  justify-content: center;
+}
+.btn-migrate:hover {
+  background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+  color: #1a1a2e;
+  transform: translateY(-1px);
+}
+.btn-migrate:active {
+  transform: translateY(0);
+}
+
 /* DriveAudioPlayer states */
 .drive-loading {
   padding: 10px 0;

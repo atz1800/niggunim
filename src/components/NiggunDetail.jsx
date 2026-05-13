@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { doc, updateDoc, deleteDoc, getDoc } from 'firebase/firestore'
+import { doc, updateDoc, deleteDoc, runTransaction } from 'firebase/firestore'
 import { db } from '../firebase'
 import { uploadToStorage } from '../utils/storageUpload'
 import ShareButton from './ShareButton'
@@ -16,63 +16,78 @@ function isDriveUrl(url) {
   return url?.includes('drive.google.com') || url?.includes('googleapis.com/drive')
 }
 
+// עדכון אטומי ב-Firestore — transaction מונע race condition כשכמה קבצים מגרים במקביל
+async function migrateUrlInFirestore(oldUrl, newUrl, uid, niggunId) {
+  const ref = doc(db, 'users', uid, 'niggunim', niggunId)
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref)
+    if (!snap.exists()) return
+    const data = snap.data()
+    const audioFiles = (data.audioFiles || []).map(f =>
+      f.url === oldUrl ? { ...f, url: newUrl } : f
+    )
+    const updates = { audioFiles }
+    if (data.audioUrl === oldUrl) updates.audioUrl = newUrl
+    tx.update(ref, updates)
+  })
+}
+
+async function fetchFromDrive(driveId, token) {
+  return fetch(
+    `https://www.googleapis.com/drive/v3/files/${driveId}?alt=media`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  )
+}
+
 /**
  * נגן אודיו הרמטי:
- * - Firebase Storage → מנגן ישירות, לא פג תוקף לעולם
- * - Drive URL ישן → מוריד + מעלה ל-Storage אוטומטית, מעדכן Firestore, ואז מנגן
- * - אחרי מיגרציה אחת הקובץ ב-Storage לצמיתות
+ * - Firebase Storage URL → מנגן ישירות, לא פג לעולם
+ * - Drive URL + טוקן זמין → מיגרציה אוטומטית שקטה לStorage, מעדכן Firestore
+ * - Drive URL + אין טוקן → כפתור "העבר" מפורש (לא popup ספונטני)
+ * - אחרי מיגרציה אחת — Storage לצמיתות, Drive לא עוד
  */
 function AudioPlayer({ audioFile, uid, niggunId, getDriveToken }) {
   const { name } = audioFile
   const [currentUrl, setCurrentUrl] = useState(audioFile.url)
   const [migrating, setMigrating] = useState(false)
+  const [needsAuth, setNeedsAuth] = useState(false)
   const [failed, setFailed] = useState(false)
   const migratedRef = useRef(false)
 
   useEffect(() => {
     if (!isDriveUrl(currentUrl) || migratedRef.current) return
     migratedRef.current = true
-    migrate()
+    const token = localStorage.getItem('driveToken')
+    if (token) {
+      runMigration(token) // טוקן קיים → מגר בשקט
+    } else {
+      setNeedsAuth(true)  // אין טוקן → הצג כפתור, לא popup
+    }
   }, [])
 
-  async function migrate() {
+  async function runMigration(token) {
     setMigrating(true)
+    setNeedsAuth(false)
     try {
       const driveId = currentUrl.match(/[?&]id=([^&]+)/)?.[1]
       if (!driveId) throw new Error('NO_ID')
 
-      // קבל טוקן — נסה מהזיכרון קודם
-      let token = localStorage.getItem('driveToken')
-      if (!token) token = await getDriveToken()
-      if (!token) throw new Error('NO_TOKEN')
-
-      // הורד מ-Drive
-      let res = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${driveId}?alt=media`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      )
+      let res = await fetchFromDrive(driveId, token)
       if (res.status === 401) {
-        token = await getDriveToken(true)
-        if (!token) throw new Error('NO_TOKEN')
-        res = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${driveId}?alt=media`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        )
+        // רענן טוקן — popup אחד בלבד אם הכרחי
+        const fresh = await getDriveToken(true)
+        if (!fresh) throw new Error('NO_TOKEN')
+        res = await fetchFromDrive(driveId, fresh)
       }
       if (!res.ok) throw new Error(`DOWNLOAD_FAILED:${res.status}`)
 
       const blob = await res.blob()
-      const mime = blob.type && blob.type !== 'application/octet-stream'
+      const mime = (blob.type && blob.type !== 'application/octet-stream')
         ? blob.type : 'audio/mpeg'
       const file = new File([blob], name || 'recording', { type: mime })
 
-      // העלה ל-Firebase Storage
       const { url: newUrl } = await uploadToStorage(file, uid, () => {})
-
-      // עדכן Firestore בצורה אטומית
-      await migrateUrlInFirestore(currentUrl, newUrl)
-
-      // עדכן תצוגה מיידית
+      await migrateUrlInFirestore(currentUrl, newUrl, uid, niggunId)
       setCurrentUrl(newUrl)
     } catch (err) {
       console.warn('Migration failed:', err.message)
@@ -82,21 +97,21 @@ function AudioPlayer({ audioFile, uid, niggunId, getDriveToken }) {
     }
   }
 
-  async function migrateUrlInFirestore(oldUrl, newUrl) {
-    const ref = doc(db, 'users', uid, 'niggunim', niggunId)
-    const snap = await getDoc(ref)
-    if (!snap.exists()) return
-    const data = snap.data()
-    const audioFiles = (data.audioFiles || []).map(f =>
-      f.url === oldUrl ? { ...f, url: newUrl } : f
-    )
-    const updates = { audioFiles }
-    if (data.audioUrl === oldUrl) updates.audioUrl = newUrl
-    await updateDoc(ref, updates)
+  async function handleMigrateClick() {
+    setNeedsAuth(false)
+    const token = await getDriveToken()
+    if (token) runMigration(token)
+    else setFailed(true)
   }
 
   if (migrating) return (
     <div className="drive-loading">🔄 מעביר לאחסון קבוע... (פעם אחת בלבד)</div>
+  )
+
+  if (needsAuth) return (
+    <button className="btn-migrate" onClick={handleMigrateClick}>
+      🔒 הפעל הקלטה — העברה חד-פעמית לאחסון קבוע
+    </button>
   )
 
   if (failed) {
