@@ -1,5 +1,5 @@
-import React, { useState, useRef } from 'react'
-import { doc, updateDoc, deleteDoc } from 'firebase/firestore'
+import React, { useState, useEffect, useRef } from 'react'
+import { doc, updateDoc, deleteDoc, getDoc } from 'firebase/firestore'
 import { db } from '../firebase'
 import { uploadToStorage } from '../utils/storageUpload'
 import ShareButton from './ShareButton'
@@ -12,16 +12,95 @@ function getAudioFiles(niggun) {
   return []
 }
 
+function isDriveUrl(url) {
+  return url?.includes('drive.google.com') || url?.includes('googleapis.com/drive')
+}
 
-// נגן אודיו חכם:
-// - Firebase Storage URL (חדש) → מנגן ישירות, ללא auth, לעולם לא פג
-// - Google Drive URL (ישן) → קישור לפתיחה ב-Drive
-function AudioPlayer({ url, name }) {
-  const [failed, setFailed] = React.useState(false)
+/**
+ * נגן אודיו הרמטי:
+ * - Firebase Storage → מנגן ישירות, לא פג תוקף לעולם
+ * - Drive URL ישן → מוריד + מעלה ל-Storage אוטומטית, מעדכן Firestore, ואז מנגן
+ * - אחרי מיגרציה אחת הקובץ ב-Storage לצמיתות
+ */
+function AudioPlayer({ audioFile, uid, niggunId, getDriveToken }) {
+  const { name } = audioFile
+  const [currentUrl, setCurrentUrl] = useState(audioFile.url)
+  const [migrating, setMigrating] = useState(false)
+  const [failed, setFailed] = useState(false)
+  const migratedRef = useRef(false)
 
-  if (!url || failed) {
-    // fallback לקישורי Drive ישנים
-    const driveId = url?.match(/[?&]id=([^&]+)/)?.[1]
+  useEffect(() => {
+    if (!isDriveUrl(currentUrl) || migratedRef.current) return
+    migratedRef.current = true
+    migrate()
+  }, [])
+
+  async function migrate() {
+    setMigrating(true)
+    try {
+      const driveId = currentUrl.match(/[?&]id=([^&]+)/)?.[1]
+      if (!driveId) throw new Error('NO_ID')
+
+      // קבל טוקן — נסה מהזיכרון קודם
+      let token = localStorage.getItem('driveToken')
+      if (!token) token = await getDriveToken()
+      if (!token) throw new Error('NO_TOKEN')
+
+      // הורד מ-Drive
+      let res = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${driveId}?alt=media`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      )
+      if (res.status === 401) {
+        token = await getDriveToken(true)
+        if (!token) throw new Error('NO_TOKEN')
+        res = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${driveId}?alt=media`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        )
+      }
+      if (!res.ok) throw new Error(`DOWNLOAD_FAILED:${res.status}`)
+
+      const blob = await res.blob()
+      const mime = blob.type && blob.type !== 'application/octet-stream'
+        ? blob.type : 'audio/mpeg'
+      const file = new File([blob], name || 'recording', { type: mime })
+
+      // העלה ל-Firebase Storage
+      const { url: newUrl } = await uploadToStorage(file, uid, () => {})
+
+      // עדכן Firestore בצורה אטומית
+      await migrateUrlInFirestore(currentUrl, newUrl)
+
+      // עדכן תצוגה מיידית
+      setCurrentUrl(newUrl)
+    } catch (err) {
+      console.warn('Migration failed:', err.message)
+      setFailed(true)
+    } finally {
+      setMigrating(false)
+    }
+  }
+
+  async function migrateUrlInFirestore(oldUrl, newUrl) {
+    const ref = doc(db, 'users', uid, 'niggunim', niggunId)
+    const snap = await getDoc(ref)
+    if (!snap.exists()) return
+    const data = snap.data()
+    const audioFiles = (data.audioFiles || []).map(f =>
+      f.url === oldUrl ? { ...f, url: newUrl } : f
+    )
+    const updates = { audioFiles }
+    if (data.audioUrl === oldUrl) updates.audioUrl = newUrl
+    await updateDoc(ref, updates)
+  }
+
+  if (migrating) return (
+    <div className="drive-loading">🔄 מעביר לאחסון קבוע... (פעם אחת בלבד)</div>
+  )
+
+  if (failed) {
+    const driveId = audioFile.url?.match(/[?&]id=([^&]+)/)?.[1]
     return (
       <a href={driveId ? `https://drive.google.com/file/d/${driveId}/view` : '#'}
          target="_blank" rel="noreferrer" className="drive-open-link">
@@ -32,7 +111,8 @@ function AudioPlayer({ url, name }) {
 
   return (
     <div dir="ltr">
-      <audio controls className="audio-player" src={url} onError={() => setFailed(true)} />
+      <audio controls className="audio-player" src={currentUrl}
+             onError={() => setFailed(true)} />
     </div>
   )
 }
@@ -254,7 +334,12 @@ export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpd
             {displayAudioFiles.map((f, i) => (
               <div key={i} className="audio-player-item">
                 <div className="audio-player-name">🎵 {f.name || `הקלטה ${i + 1}`}</div>
-                <AudioPlayer url={f.url} name={f.name} />
+                <AudioPlayer
+                  audioFile={f}
+                  uid={uid}
+                  niggunId={niggun.id}
+                  getDriveToken={getDriveToken}
+                />
               </div>
             ))}
           </div>
