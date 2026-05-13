@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react'
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore'
 import { db } from '../firebase'
-import { uploadToDrive } from '../utils/driveUpload'
+import { uploadToStorage } from '../utils/storageUpload'
 
 const MOODS = ['שבת', 'שמח', 'עצוב', 'מהיר', 'איטי', 'דבקות', 'תפילה', 'אחר']
 
@@ -47,25 +47,9 @@ export default function AddNiggun({ uid, getDriveToken, onClose, onAdded }) {
 
   async function startUpload(entry) {
     try {
-      let token = await getDriveToken()
-      if (!token) throw new Error('אין גישה ל-Google Drive. אנא התנתק והתחבר מחדש.')
-
-      let result
-      try {
-        result = await uploadToDrive(entry.file, token, (progress) => {
-          setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress } : f))
-        })
-      } catch (uploadErr) {
-        if (uploadErr.message === 'TOKEN_EXPIRED') {
-          token = await getDriveToken(true)
-          if (!token) throw new Error('לא ניתן לחדש את החיבור ל-Google Drive')
-          result = await uploadToDrive(entry.file, token, (progress) => {
-            setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress } : f))
-          })
-        } else {
-          throw uploadErr
-        }
-      }
+      const result = await uploadToStorage(entry.file, uid, (progress) => {
+        setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress } : f))
+      })
 
       setFiles(prev => prev.map(f => f.id === entry.id
         ? { ...f, status: 'done', progress: 100, result }
