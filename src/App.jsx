@@ -6,6 +6,7 @@ import NiggunCard from './components/NiggunCard'
 import AddNiggun from './components/AddNiggun'
 import NiggunDetail from './components/NiggunDetail'
 import SplashScreen, { FloatingNotes } from './components/SplashScreen'
+import { useBackGuard } from './hooks/useBackGuard'
 
 const MOODS = ['הכל', 'שבת', 'שמח', 'עצוב', 'מהיר', 'איטי', 'דבקות', 'תפילה', 'אחר']
 
@@ -62,6 +63,12 @@ export default function App() {
   const [moodFilter, setMoodFilter] = useState('הכל')
   const [toast, setToast] = useState({ msg: '', type: '' })
   const [driveToken, setDriveToken] = useState(() => localStorage.getItem('driveToken') || null)
+
+  // מחוות "חזור": סוגרת מסך פירוט / מודאל הוספה לפני יציאה מהאפליקציה
+  useBackGuard([
+    { open: !!selected, close: () => setSelected(null) },
+    { open: showAdd, close: () => setShowAdd(false) },
+  ])
 
   useEffect(() => {
     return onAuthStateChanged(auth, u => setUser(u || null))
@@ -235,6 +242,7 @@ export default function App() {
         />
       )}
       <Toast msg={toast.msg} type={toast.type} />
+      <footer className="app-footer">נוצר ע"י עמיחי צדוק</footer>
     </div>
   )
 }
