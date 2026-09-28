@@ -1,13 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
-import { doc, updateDoc, runTransaction } from 'firebase/firestore'
+import { doc, updateDoc, runTransaction, serverTimestamp } from 'firebase/firestore'
 import { db } from '../firebase'
 import { uploadToStorage, deleteStorageFiles } from '../utils/storageUpload'
 import { getAudioFiles, isDriveUrl } from '../lib/audio'
 import { useAudioUploads } from '../hooks/useAudioUploads'
+import { getTags, docToForm, formToDoc } from '../lib/niggun'
 import ShareButton from './ShareButton'
 import NiggunFormFields from './NiggunFormFields'
-import FileUploadList from './FileUploadList'
-import AudioDropZone from './AudioDropZone'
+import AudioInputs from './AudioInputs'
+import ChordsView from './ChordsView'
+import FavoriteButton from './FavoriteButton'
 
 // עדכון אטומי ב-Firestore — transaction מונע race condition כשכמה קבצים מגרים במקביל
 async function migrateUrlInFirestore(oldUrl, newUrl, uid, niggunId) {
@@ -41,7 +43,7 @@ const driveIdOf = url => url?.match(/[?&]id=([^&]+)/)?.[1]
  * - Drive URL + אין טוקן → כפתור "העבר" מפורש (לא popup ספונטני)
  * - אחרי מיגרציה אחת — Storage לצמיתות, Drive לא עוד
  */
-function AudioPlayer({ audioFile, uid, niggunId, getDriveToken }) {
+function AudioPlayer({ audioFile, uid, niggunId, getDriveToken, onPlay }) {
   const { name, url } = audioFile
   const [status, setStatus] = useState(() => isDriveUrl(url) ? 'pending' : 'ready')
   const started = useRef(false)
@@ -114,51 +116,36 @@ function AudioPlayer({ audioFile, uid, niggunId, getDriveToken }) {
   return (
     <div dir="ltr">
       <audio controls preload="metadata" className="audio-player" src={url}
-             aria-label={name || 'הקלטה'} onError={() => setStatus('failed')} />
+             aria-label={name || 'הקלטה'} onError={() => setStatus('failed')} onPlay={onPlay} />
     </div>
   )
 }
 
-function formFrom(niggun) {
-  return {
-    name: niggun.name || '',
-    chords: niggun.chords || '',
-    story: niggun.story || '',
-    mood: niggun.mood || '',
-    hebrewDate: niggun.hebrewDate || '',
-  }
-}
-
-function EditNiggun({ niggun, uid, onCancel, onSaved, onSaveError }) {
+function EditNiggun({ niggun, uid, onCancel, onSaved, onSaveError, tagSuggestions }) {
   // מאותחל מהגרסה העדכנית ביותר של הניגון ברגע הכניסה לעריכה
-  const [form, setForm] = useState(() => formFrom(niggun))
+  const [form, setForm] = useState(() => docToForm(niggun))
+  const [recording, setRecording] = useState(false)
   const [existingFiles, setExistingFiles] = useState(() => getAudioFiles(niggun))
   const [error, setError] = useState('')
   const uploads = useAudioUploads(uid, setError)
 
-  function handleChange(e) {
-    setForm(f => ({ ...f, [e.target.name]: e.target.value }))
-  }
-
   function handleCancel() {
+    if (recording && !window.confirm('ההקלטה עדיין רצה. לצאת בלי לשמור אותה?')) return
     uploads.discard()
     onCancel()
   }
 
   function handleSave(e) {
     e.preventDefault()
-    if (!form.name.trim()) { setError('שם הניגון חובה'); return }
+    const data = formToDoc(form)
+    if (!data.name) { setError('שם הניגון חובה'); return }
     const added = uploads.done
     const allAudioFiles = [...existingFiles, ...added]
     const keptUrls = new Set(allAudioFiles.map(f => f.url))
     const removed = getAudioFiles(niggun).map(f => f.url).filter(u => !keptUrls.has(u))
     // כתיבה אופטימית (ראה AddNiggun) — המסך מתעדכן מיד מהמטמון המקומי
     updateDoc(doc(db, 'users', uid, 'niggunim', niggun.id), {
-      name: form.name.trim(),
-      chords: form.chords.trim(),
-      story: form.story.trim(),
-      mood: form.mood,
-      hebrewDate: form.hebrewDate.trim(),
+      ...data,
       audioFiles: allAudioFiles,
       audioUrl: allAudioFiles[0]?.url || '',
       audioFileName: allAudioFiles[0]?.name || '',
@@ -180,7 +167,7 @@ function EditNiggun({ niggun, uid, onCancel, onSaved, onSaveError }) {
         <h1 className="detail-name">✏️ עריכת ניגון</h1>
       </div>
 
-      <NiggunFormFields form={form} onChange={handleChange} storyRows={5} />
+      <NiggunFormFields form={form} setForm={setForm} tagSuggestions={tagSuggestions} />
 
       <div className="form-group">
         <span className="form-label">הקלטות קיימות</span>
@@ -202,28 +189,32 @@ function EditNiggun({ niggun, uid, onCancel, onSaved, onSaveError }) {
 
       <div className="form-group">
         <span className="form-label">הוסף הקלטות</span>
-        <AudioDropZone onFiles={uploads.add}>
-          🎵 גרור לכאן או <strong>לחץ להוספת קבצים</strong> — יעלו מיד
-        </AudioDropZone>
-        <FileUploadList files={uploads.files} onRemove={uploads.remove} />
-        {uploads.uploading && <div className="upload-status-msg" role="status">⏳ מעלה קבצים... יש להמתין</div>}
+        <AudioInputs uploads={uploads} onError={setError} onRecordingChange={setRecording} />
       </div>
 
       {error && <div className="form-error" role="alert">⚠️ {error}</div>}
 
       <div className="form-actions">
         <button type="button" className="btn btn-secondary" onClick={handleCancel}>ביטול</button>
-        <button type="submit" className="btn btn-primary" disabled={uploads.uploading}>
-          {uploads.uploading ? '⏳ ממתין להעלאה...' : '💾 שמור'}
+        <button type="submit" className="btn btn-primary" disabled={uploads.uploading || recording}>
+          {recording ? '🎙️ מקליט...' : uploads.uploading ? '⏳ ממתין להעלאה...' : '💾 שמור'}
         </button>
       </div>
     </form>
   )
 }
 
-export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpdated, onDelete, onSaveError }) {
+export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpdated, onDelete, onSaveError, tagSuggestions }) {
   const [editing, setEditing] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const markedPlayed = useRef(false)
+
+  // "נוגן לאחרונה" — פעם אחת לכל פתיחה של המסך
+  function markPlayed() {
+    if (markedPlayed.current) return
+    markedPlayed.current = true
+    updateDoc(doc(db, 'users', uid, 'niggunim', niggun.id), { lastPlayedAt: serverTimestamp() }).catch(() => {})
+  }
 
   if (editing) {
     return (
@@ -233,21 +224,26 @@ export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpd
         onCancel={() => setEditing(false)}
         onSaved={() => { setEditing(false); onUpdated() }}
         onSaveError={onSaveError}
+        tagSuggestions={tagSuggestions}
       />
     )
   }
 
   const audioFiles = getAudioFiles(niggun)
+  const tags = getTags(niggun)
 
   return (
     <div>
       <div className="detail-header">
         <button type="button" className="detail-back" onClick={onBack} aria-label="חזרה לרשימה">←</button>
         <h1 className="detail-name">{niggun.name}</h1>
+        <FavoriteButton uid={uid} niggun={niggun} className="detail-fav" />
       </div>
 
       <div className="detail-meta">
-        {niggun.mood && <span className="meta-chip mood">🎭 {niggun.mood}</span>}
+        {tags.map(t => <span key={t} className="meta-chip mood">{t}</span>)}
+        {niggun.source && <span className="meta-chip">🕍 {niggun.source}</span>}
+        {niggun.composer && <span className="meta-chip">✍️ {niggun.composer}</span>}
         {niggun.hebrewDate && <span className="meta-chip">📅 {niggun.hebrewDate}</span>}
         {audioFiles.length > 0 && (
           <span className="meta-chip">🎵 {audioFiles.length > 1 ? `${audioFiles.length} הקלטות` : 'הקלטה'}</span>
@@ -257,7 +253,7 @@ export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpd
       {niggun.chords && (
         <section className="detail-section">
           <h2 className="detail-section-label">אקורדים</h2>
-          <div className="detail-chords" dir="ltr">{niggun.chords}</div>
+          <ChordsView chords={niggun.chords} />
         </section>
       )}
 
@@ -273,10 +269,18 @@ export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpd
                   uid={uid}
                   niggunId={niggun.id}
                   getDriveToken={getDriveToken}
+                  onPlay={markPlayed}
                 />
               </div>
             ))}
           </div>
+        </section>
+      )}
+
+      {niggun.lyrics && (
+        <section className="detail-section">
+          <h2 className="detail-section-label">מילים</h2>
+          <div className="detail-story detail-lyrics">{niggun.lyrics}</div>
         </section>
       )}
 

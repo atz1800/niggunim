@@ -13,19 +13,21 @@ export default function Modal({ titleId, onClose, children }) {
     const node = ref.current
     if (!node.contains(document.activeElement)) node.querySelector(FOCUSABLE)?.focus()
 
+    // מאזינים על document — Escape צריך לעבוד גם כשהפוקוס יצא מהמודאל (למשל אחרי confirm)
     function onKey(e) {
-      if (e.key === 'Escape') { e.stopPropagation(); onCloseRef.current() }
+      if (e.key === 'Escape') { e.stopPropagation(); onCloseRef.current(); return }
       if (e.key !== 'Tab') return
+      if (!node.contains(document.activeElement)) { e.preventDefault(); node.querySelector(FOCUSABLE)?.focus(); return }
       const items = [...node.querySelectorAll(FOCUSABLE)]
       if (!items.length) return
       const first = items[0], last = items[items.length - 1]
       if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
     }
-    node.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey)
     document.body.style.overflow = 'hidden'
     return () => {
-      node.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey)
       document.body.style.overflow = ''
       previouslyFocused?.focus?.()
     }

@@ -12,6 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "fflate": "^0.8.3",
     "firebase": "^12.19.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"

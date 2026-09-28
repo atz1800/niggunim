@@ -1,21 +1,41 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, lazy, Suspense } from 'react'
-import { collection, orderBy, query, onSnapshot, doc, deleteDoc } from 'firebase/firestore'
+import { collection, orderBy, query, onSnapshot, doc, deleteDoc, updateDoc, serverTimestamp } from 'firebase/firestore'
 import { signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth'
 import { db, auth, googleProvider } from './firebase'
 import NiggunCard from './components/NiggunCard'
 import Toast from './components/Toast'
+import PlayerBar from './components/PlayerBar'
 import SplashScreen, { FloatingNotes } from './components/SplashScreen'
 import { shouldShowSplash } from './lib/splash'
 import { useBackGuard } from './hooks/useBackGuard'
 import { getDriveToken, clearDriveToken } from './utils/driveToken'
-import { getAudioFiles } from './lib/audio'
+import { getAudioFiles, isDriveUrl } from './lib/audio'
 import { matchesSearch } from './lib/search'
-import { MOODS, ALL_MOODS } from './lib/constants'
+import { getTags, collectTags, sortNiggunim, SORTS } from './lib/niggun'
+import { MOODS } from './lib/constants'
+import { recordingSupported } from './hooks/useRecorder'
 
 const loadAddNiggun = () => import('./components/AddNiggun')
 const loadNiggunDetail = () => import('./components/NiggunDetail')
 const AddNiggun = lazy(loadAddNiggun)
 const NiggunDetail = lazy(loadNiggunDetail)
+const BackupDialog = lazy(() => import('./components/BackupDialog'))
+
+const FAVORITES = '__favorites__'
+
+function readPref(key, fallback) {
+  try { return localStorage.getItem(key) || fallback } catch { return fallback }
+}
+function writePref(key, value) {
+  try { localStorage.setItem(key, value) } catch { /* חסום */ }
+}
+
+// רשימת השמעה: כל ההקלטות של הניגונים לפי הסדר (הקלטות Drive ישנות מדולגות — הן דורשות העברה)
+function buildQueue(list) {
+  return list.flatMap(n => getAudioFiles(n)
+    .filter(f => f.url && !isDriveUrl(f.url))
+    .map(f => ({ niggunId: n.id, name: n.name, fileName: f.name, url: f.url })))
+}
 
 const QUOTE = '״על ידי נגינה דקדושה יכולין לזכות לבחינת נבואה, כי עיקר הדבקות להשם יתברך הוא על-ידי נגינה.״'
 const QUOTE_SOURCE = 'ליקוטי עצות — רבי נחמן מברסלב'
@@ -25,7 +45,7 @@ function Loading({ text = 'טוען...' }) {
   return <div className="loading" role="status"><div className="spinner" aria-hidden="true" />{text}</div>
 }
 
-function AppHeader({ user, onLogout, onAdd, showAdd }) {
+function AppHeader({ user, onLogout, onAdd, showAdd, onBackup }) {
   return (
     <header className="header">
       <div className="header-title">
@@ -40,6 +60,10 @@ function AppHeader({ user, onLogout, onAdd, showAdd }) {
         <div className="header-actions">
           {showAdd && (
             <button type="button" className="btn btn-primary" onClick={onAdd}>➕ הוסף ניגון</button>
+          )}
+          {onBackup && (
+            <button type="button" className="btn btn-secondary btn-icon" onClick={onBackup}
+              title="גיבוי ושחזור" aria-label="גיבוי ושחזור">💾</button>
           )}
           <div className="user-info">
             {user.photoURL && (
@@ -67,7 +91,13 @@ export default function App() {
   const [showAdd, setShowAdd] = useState(false)
   const [selectedId, setSelectedId] = useState(null)
   const [search, setSearch] = useState('')
-  const [moodFilter, setMoodFilter] = useState(ALL_MOODS)
+  const [tagFilter, setTagFilter] = useState('')
+  const [sort, setSort] = useState(() => readPref('sort', 'newest'))
+  const [quickRecord, setQuickRecord] = useState(false)
+  const [showBackup, setShowBackup] = useState(false)
+  const [player, setPlayer] = useState(null) // { queue, index }
+  const addBusy = useRef(false)
+  const playedThisSession = useRef(new Set())
   const [toast, setToast] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
   const toastTimer = useRef(null)
@@ -85,8 +115,24 @@ export default function App() {
   // מחוות "חזור": סוגרת מסך פירוט / מודאל הוספה לפני יציאה מהאפליקציה
   useBackGuard([
     { open: !!selected, close: () => setSelectedId(null) },
-    { open: showAdd, close: () => setShowAdd(false) },
+    { open: showBackup, close: () => setShowBackup(false) },
+    {
+      open: showAdd,
+      close: () => {
+        // הקלטה רצה — לא זורקים אותה בטעות במחוות "חזור"
+        if (addBusy.current && !window.confirm('ההקלטה עדיין רצה. לצאת בלי לשמור אותה?')) return
+        addBusy.current = false
+        setShowAdd(false)
+      },
+    },
   ])
+
+  // רק הקלטה אחת מתנגנת בכל רגע (נגן תחתון / נגני מסך הפירוט)
+  useEffect(() => {
+    const onPlay = e => document.querySelectorAll('audio').forEach(a => { if (a !== e.target && !a.paused) a.pause() })
+    document.addEventListener('play', onPlay, true)
+    return () => document.removeEventListener('play', onPlay, true)
+  }, [])
 
   useEffect(() => onAuthStateChanged(auth, u => setUser(u || null)), [])
 
@@ -171,12 +217,43 @@ export default function App() {
     await signOut(auth)
     setSelectedId(null)
     setShowAdd(false)
+    setPlayer(null)
     clearDriveToken()
   }
 
-  const filtered = useMemo(() => niggunim.filter(n =>
-    matchesSearch(n, deferredSearch) && (moodFilter === ALL_MOODS || n.mood === moodFilter)
-  ), [niggunim, deferredSearch, moodFilter])
+  const allTags = useMemo(() => collectTags(niggunim), [niggunim])
+  const tagSuggestions = useMemo(() => collectTags(niggunim, MOODS), [niggunim])
+
+  const filtered = useMemo(() => sortNiggunim(niggunim.filter(n =>
+    matchesSearch(n, deferredSearch) &&
+    (!tagFilter || (tagFilter === FAVORITES ? n.favorite : getTags(n).includes(tagFilter)))
+  ), sort), [niggunim, deferredSearch, tagFilter, sort])
+
+  function changeSort(value) {
+    setSort(value)
+    writePref('sort', value)
+  }
+
+  function openAdd(record = false) {
+    setQuickRecord(record)
+    setShowAdd(true)
+  }
+
+  // ניגון מהרשימה: מתחיל מהניגון שנבחר וממשיך ברצף עם שאר הרשימה המסוננת
+  function playFrom(niggunId) {
+    const queue = buildQueue(filtered)
+    if (!queue.length) { showToast('אין הקלטות לניגון ברשימה הזו', 'error'); return }
+    const index = Math.max(0, queue.findIndex(t => t.niggunId === niggunId))
+    setPlayer({ queue, index })
+  }
+
+  function onTrackStart(track) {
+    if (playedThisSession.current.has(track.niggunId)) return
+    playedThisSession.current.add(track.niggunId)
+    updateDoc(doc(db, 'users', user.uid, 'niggunim', track.niggunId), { lastPlayedAt: serverTimestamp() }).catch(() => {})
+  }
+
+  const playingId = player?.queue[player.index]?.niggunId
 
   if (!splashDone) {
     return <SplashScreen onDone={() => setSplashDone(true)} />
@@ -207,11 +284,15 @@ export default function App() {
     )
   }
 
-  if (selected) {
-    return (
-      <div className="app">
-        <AppHeader user={user} onLogout={handleLogout} showAdd={false} />
-        <main>
+  const filtering = !!search || !!tagFilter
+
+  return (
+    <div className={`app ${player ? 'has-player' : ''}`}>
+      <AppHeader user={user} onLogout={handleLogout} onAdd={() => openAdd(false)} showAdd={!selected}
+        onBackup={selected ? null : () => setShowBackup(true)} />
+
+      <main>
+        {selected ? (
           <Suspense fallback={<Loading />}>
             <NiggunDetail
               key={selected.id}
@@ -222,63 +303,103 @@ export default function App() {
               onUpdated={() => showToast('✅ עודכן בהצלחה!')}
               onDelete={handleDelete}
               onSaveError={msg => showToast(msg, 'error')}
+              tagSuggestions={tagSuggestions}
             />
           </Suspense>
-        </main>
-        <Toast toast={toast} onAction={undoDelete} />
-      </div>
-    )
-  }
-
-  const filtering = !!search || moodFilter !== ALL_MOODS
-
-  return (
-    <div className="app">
-      <AppHeader user={user} onLogout={handleLogout} onAdd={() => setShowAdd(true)} showAdd={true} />
-
-      <main>
-        <div className="toolbar">
-          <div className="search-box">
-            <span className="search-icon" aria-hidden="true">🔍</span>
-            <input type="search" placeholder="חפש ניגון, אקורדים, סיפור..." aria-label="חיפוש ניגונים"
-              value={search} onChange={e => setSearch(e.target.value)} />
-          </div>
-          <select className="filter-select" value={moodFilter} aria-label="סינון לפי מצב רוח"
-            onChange={e => setMoodFilter(e.target.value)}>
-            {[ALL_MOODS, ...MOODS].map(m => <option key={m} value={m}>{m}</option>)}
-          </select>
-        </div>
-
-        {loading ? (
-          <Loading text="טוען ניגונים..." />
-        ) : filtered.length === 0 ? (
-          <div className="empty-state">
-            <div className="emoji" aria-hidden="true">{filtering ? '🔎' : '🎵'}</div>
-            <h2>{filtering ? 'לא נמצאו תוצאות' : 'היומן שלך ריק עדיין'}</h2>
-            <p>{filtering ? 'נסה מילות חיפוש אחרות' : 'הוסף את הניגון הראשון שלך!'}</p>
-            {!filtering && (
-              <button type="button" className="btn btn-primary" onClick={() => setShowAdd(true)}>➕ הוסף ניגון ראשון</button>
-            )}
-          </div>
         ) : (
-          <div className="gallery">
-            {filtered.map(n => <NiggunCard key={n.id} niggun={n} onOpen={() => setSelectedId(n.id)} />)}
-          </div>
+          <>
+            <div className="toolbar">
+              <div className="search-box">
+                <span className="search-icon" aria-hidden="true">🔍</span>
+                <input type="search" placeholder="חפש ניגון, אקורדים, מילים, סיפור..." aria-label="חיפוש ניגונים"
+                  value={search} onChange={e => setSearch(e.target.value)} />
+              </div>
+              <select className="filter-select" value={sort} aria-label="מיון"
+                onChange={e => changeSort(e.target.value)}>
+                {Object.entries(SORTS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              </select>
+              <button type="button" className="btn btn-secondary play-all" onClick={() => playFrom(null)}
+                disabled={!filtered.some(n => getAudioFiles(n).length)}>▶ נגן הכל</button>
+            </div>
+
+            {(allTags.length > 0 || niggunim.some(n => n.favorite)) && (
+              <div className="chips filter-chips" role="group" aria-label="סינון">
+                <button type="button" className={`chip ${!tagFilter ? 'active' : ''}`} aria-pressed={!tagFilter}
+                  onClick={() => setTagFilter('')}>הכל</button>
+                {niggunim.some(n => n.favorite) && (
+                  <button type="button" className={`chip ${tagFilter === FAVORITES ? 'active' : ''}`}
+                    aria-pressed={tagFilter === FAVORITES}
+                    onClick={() => setTagFilter(t => (t === FAVORITES ? '' : FAVORITES))}>★ מועדפים</button>
+                )}
+                {allTags.map(t => (
+                  <button key={t} type="button" className={`chip ${tagFilter === t ? 'active' : ''}`}
+                    aria-pressed={tagFilter === t} onClick={() => setTagFilter(f => (f === t ? '' : t))}>{t}</button>
+                ))}
+              </div>
+            )}
+
+            {loading ? (
+              <Loading text="טוען ניגונים..." />
+            ) : filtered.length === 0 ? (
+              <div className="empty-state">
+                <div className="emoji" aria-hidden="true">{filtering ? '🔎' : '🎵'}</div>
+                <h2>{filtering ? 'לא נמצאו תוצאות' : 'היומן שלך ריק עדיין'}</h2>
+                <p>{filtering ? 'נסה מילות חיפוש אחרות' : 'הוסף את הניגון הראשון שלך!'}</p>
+                {!filtering && (
+                  <button type="button" className="btn btn-primary" onClick={() => openAdd(false)}>➕ הוסף ניגון ראשון</button>
+                )}
+              </div>
+            ) : (
+              <div className="gallery">
+                {filtered.map(n => (
+                  <NiggunCard key={n.id} niggun={n} uid={user.uid} playing={playingId === n.id}
+                    onOpen={() => setSelectedId(n.id)} onPlay={() => playFrom(n.id)} />
+                ))}
+              </div>
+            )}
+          </>
         )}
       </main>
+
+      {!selected && recordingSupported() && (
+        <button type="button" className="fab-record" onClick={() => openAdd(true)}
+          aria-label="הקלטה מהירה של ניגון" title="הקלטה מהירה">🎙️</button>
+      )}
 
       {showAdd && (
         <Suspense fallback={null}>
           <AddNiggun
             uid={user.uid}
+            quickRecord={quickRecord}
+            tagSuggestions={tagSuggestions}
+            onBusyChange={busy => { addBusy.current = busy }}
             onClose={() => setShowAdd(false)}
             onAdded={() => showToast('✅ הניגון נשמר!')}
             onSaveError={msg => showToast(msg, 'error')}
           />
         </Suspense>
       )}
+
+      {showBackup && (
+        <Suspense fallback={null}>
+          <BackupDialog uid={user.uid} niggunim={niggunim} onClose={() => setShowBackup(false)}
+            onToast={msg => showToast(msg)} />
+        </Suspense>
+      )}
+
+      {player && (
+        <PlayerBar
+          queue={player.queue}
+          index={player.index}
+          onIndex={index => setPlayer(p => ({ ...p, index }))}
+          onClose={() => setPlayer(null)}
+          onOpen={id => setSelectedId(id)}
+          onTrackStart={onTrackStart}
+        />
+      )}
+
       <Toast toast={toast} onAction={undoDelete} />
-      <footer className="app-footer">נוצר ע"י עמיחי צדוק</footer>
+      {!selected && <footer className="app-footer">נוצר ע"י עמיחי צדוק</footer>}
     </div>
   )
 }
