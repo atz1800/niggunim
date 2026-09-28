@@ -4,11 +4,31 @@ import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
   base: '/niggunim/',
+  build: {
+    // Firestore + Auth לבדם ~600KB (לא דחוס). הם בקובץ נפרד ונשמרים במטמון
+    chunkSizeWarningLimit: 650,
+    rolldownOptions: {
+      output: {
+        // Firebase בקובץ נפרד — משתנה לעיתים רחוקות, נשאר במטמון בין עדכוני האפליקציה
+        codeSplitting: {
+          groups: [
+            // Storage נטען רק במסכי הוספה/פירוט (lazy) ולכן לא נכלל כאן
+            { name: 'firebase', test: /node_modules[\\/](@firebase|firebase)[\\/](?!storage)/ },
+            { name: 'react', test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/ },
+          ],
+        },
+      },
+    },
+  },
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.js'],
+  },
   plugins: [
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['logo.png', 'favicon.svg'],
+      includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
       manifest: {
         name: 'יומן הניגונים שלי',
         short_name: 'ניגונים',
@@ -22,22 +42,27 @@ export default defineConfig({
         dir: 'rtl',
         lang: 'he',
         icons: [
-          { src: '/niggunim/logo.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-          { src: '/niggunim/logo.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+          { src: '/niggunim/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: '/niggunim/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: '/niggunim/icon-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
       workbox: {
         navigateFallback: '/niggunim/index.html',
         navigateFallbackDenylist: [/^\/__/],
-        globPatterns: ['**/*.{js,css,html,png,svg,ico}'],
+        globPatterns: ['**/*.{js,css,html,svg,ico}', 'icon-*.png', 'apple-touch-icon.png'],
         runtimeCaching: [
           {
-            // Firebase Storage audio — cache-first, 30 ימים
+            // Firebase Storage audio — cache-first, 30 ימים.
+            // rangeRequests: נגני אודיו (במיוחד Safari) מבקשים טווחי בתים — חובה לתמוך.
+            // רק תשובות 200 נשמרות: תשובות opaque/206 במטמון שוברות ניגון ב-iOS.
             urlPattern: /^https:\/\/firebasestorage\.googleapis\.com\/.*/i,
             handler: 'CacheFirst',
             options: {
               cacheName: 'audio-cache',
-              expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 * 30 },
+              rangeRequests: true,
+              cacheableResponse: { statuses: [200] },
+              expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 * 30, purgeOnQuotaError: true },
             },
           },
           {
@@ -46,6 +71,7 @@ export default defineConfig({
             handler: 'CacheFirst',
             options: {
               cacheName: 'fonts-cache',
+              cacheableResponse: { statuses: [0, 200] },
               expiration: { maxEntries: 20, maxAgeSeconds: 60 * 60 * 24 * 365 },
             },
           },

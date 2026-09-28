@@ -2,10 +2,18 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     match /users/{userId}/niggunim/{fileName} {
-      // רק המשתמש עצמו יכול להעלות קבצים לתיקייה שלו
-      allow write: if request.auth != null && request.auth.uid == userId;
-      // קריאה חופשית — ה-download URL קבוע ולא פג תוקף
-      allow read: if true;
+      // קריאת קובץ בודד פתוחה — ה-<audio> לא שולח הרשאות, והקישורים נשמרים/משותפים.
+      // רשימת הקבצים של משתמש (list) — רק לבעלים, כדי שאי אפשר יהיה לסרוק ולהוריד הכל.
+      allow get: if true;
+      allow list: if request.auth != null && request.auth.uid == userId;
+
+      // העלאה: רק הבעלים, רק קבצי שמע, עד 50MB
+      allow create, update: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.size < 50 * 1024 * 1024
+        && request.resource.contentType.matches('audio/.*');
+
+      allow delete: if request.auth != null && request.auth.uid == userId;
     }
   }
 }

@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
+import { markSplashShown } from '../lib/splash'
 
 const NOTE_CONFIGS = [
   { note: '♩', left: '5%',  delay: '0s',    dur: '3.8s', size: '1.6rem', op: 0.55 },
@@ -40,16 +41,16 @@ function TypewriterTitle() {
   const [shown, setShown] = useState(0)
 
   useEffect(() => {
+    let iv
     const start = setTimeout(() => {
-      const iv = setInterval(() => {
+      iv = setInterval(() => {
         setShown(n => {
           if (n >= TITLE.length) { clearInterval(iv); return n }
           return n + 1
         })
-      }, 70)
-      return () => clearInterval(iv)
-    }, 500)
-    return () => clearTimeout(start)
+      }, 45)
+    }, 250)
+    return () => { clearTimeout(start); clearInterval(iv) }
   }, [])
 
   return (
@@ -62,17 +63,31 @@ function TypewriterTitle() {
 
 const EQ_DELAYS = [0, 0.15, 0.3, 0.08, 0.22, 0.38, 0.12]
 
+const SPLASH_MS = 2600
+const EXIT_MS = 500
+
 export default function SplashScreen({ onDone }) {
   const [phase, setPhase] = useState('enter')
+  const onDoneRef = useRef(onDone)
+  useEffect(() => { onDoneRef.current = onDone })
 
   useEffect(() => {
-    const t1 = setTimeout(() => setPhase('exit'), 4600)
-    const t2 = setTimeout(() => onDone(), 5200)
+    markSplashShown()
+    const t1 = setTimeout(() => setPhase('exit'), SPLASH_MS)
+    const t2 = setTimeout(() => onDoneRef.current(), SPLASH_MS + EXIT_MS)
     return () => { clearTimeout(t1); clearTimeout(t2) }
   }, [])
 
+  // הקשה / מקש כלשהו → דילוג
+  useEffect(() => {
+    const skip = () => onDoneRef.current()
+    window.addEventListener('keydown', skip)
+    return () => window.removeEventListener('keydown', skip)
+  }, [])
+
   return (
-    <div className={`splash-root ${phase}`}>
+    <div className={`splash-root ${phase}`} onClick={() => onDoneRef.current()}
+      role="button" tabIndex={-1} aria-label="דלג על מסך הפתיחה">
       <FloatingNotes />
 
       <div className="splash-center">
@@ -95,9 +110,10 @@ export default function SplashScreen({ onDone }) {
         </blockquote>
         <p className="splash-quote-source">ליקוטי עצות — רבי נחמן מברסלב</p>
 
-        <div className="splash-dots">
+        <div className="splash-dots" aria-hidden="true">
           <span /><span /><span />
         </div>
+        <p className="splash-skip">הקש לדילוג</p>
       </div>
     </div>
   )

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 
 /* ═══════════════════════════════════════════════════════════════
    useBackGuard — תיקון מחוות "חזור" (Edge Swipe Back) ל-PWA React
@@ -28,10 +28,11 @@ import { useEffect, useRef } from 'react'
 export function useBackGuard(layers) {
   // ref כדי שה-listener יקרא תמיד את מצב השכבות העדכני (בלי stale closure)
   const ref = useRef(layers)
-  ref.current = layers
+  useLayoutEffect(() => { ref.current = layers })
 
   useEffect(() => {
-    history.pushState({ bg: 1 }, '') // מלכודת ראשונית — תמיד דרוכה
+    // מלכודת ראשונית — תמיד דרוכה (בלי כפילות ב-StrictMode / רענון)
+    if (history.state?.bg !== 1) history.pushState({ bg: 1 }, '')
 
     const onPop = () => {
       const open = ref.current.filter(l => l && l.open)
