@@ -46,3 +46,28 @@ export function isDriveUrl(url) {
   return typeof url === 'string' &&
     (url.includes('drive.google.com') || url.includes('googleapis.com/drive'))
 }
+
+// הקלטות webm ישנות (לפני שהתחלנו לכתוב את האורך לקובץ) מדווחות משך Infinity,
+// ואז אי אפשר לקפוץ בהן. קפיצה זמנית לסוף הקובץ גורמת לדפדפן לחשב את המשך האמיתי,
+// ואז חוזרים למקום. בזמן התיקון a.dataset.fixingDuration מסומן והנגן מושתק.
+export function fixInfiniteDuration(e) {
+  const a = e.currentTarget
+  if (a.duration !== Infinity || a.dataset.fixingDuration) return
+  const pos = a.currentTime
+  const wasMuted = a.muted
+  a.dataset.fixingDuration = '1'
+  a.muted = true
+  const done = () => {
+    if (!Number.isFinite(a.duration)) return
+    a.removeEventListener('durationchange', done)
+    a.currentTime = pos
+    a.muted = wasMuted
+    delete a.dataset.fixingDuration
+  }
+  a.addEventListener('durationchange', done)
+  a.currentTime = 1e101
+}
+
+export function isFixingDuration(a) {
+  return !!a?.dataset.fixingDuration
+}

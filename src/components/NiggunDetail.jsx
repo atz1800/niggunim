@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { doc, updateDoc, runTransaction, serverTimestamp } from 'firebase/firestore'
 import { db } from '../firebase'
 import { uploadToStorage, deleteStorageFiles } from '../utils/storageUpload'
-import { getAudioFiles, isDriveUrl } from '../lib/audio'
+import { getAudioFiles, isDriveUrl, fixInfiniteDuration } from '../lib/audio'
 import { useAudioUploads } from '../hooks/useAudioUploads'
 import { getTags, docToForm, formToDoc } from '../lib/niggun'
 import ShareButton from './ShareButton'
@@ -116,7 +116,8 @@ function AudioPlayer({ audioFile, uid, niggunId, getDriveToken, onPlay }) {
   return (
     <div dir="ltr">
       <audio controls preload="metadata" className="audio-player" src={url}
-             aria-label={name || 'הקלטה'} onError={() => setStatus('failed')} onPlay={onPlay} />
+             aria-label={name || 'הקלטה'} onError={() => setStatus('failed')} onPlay={onPlay}
+             onLoadedMetadata={fixInfiniteDuration} />
     </div>
   )
 }

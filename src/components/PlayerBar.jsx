@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { formatDuration } from '../hooks/useRecorder'
+import { fixInfiniteDuration, isFixingDuration } from '../lib/audio'
 
 /**
  * נגן תחתון — מנגן רשימת הקלטות ברצף (פלייליסט).
@@ -69,9 +70,17 @@ export default function PlayerBar({ queue, index, onIndex, onClose, onOpen, onTr
         preload="auto"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
-        // הקלטות שנוצרו בדפדפן (webm) מדווחות לפעמים משך Infinity — מתייחסים כלא ידוע
-        onTimeUpdate={e => setTime({ cur: e.target.currentTime, dur: Number.isFinite(e.target.duration) ? e.target.duration : 0 })}
-        onEnded={() => (hasNext ? onIndex(index + 1) : setPlaying(false))}
+        onLoadedMetadata={fixInfiniteDuration}
+        onTimeUpdate={e => {
+          const a = e.currentTarget
+          if (isFixingDuration(a)) return
+          setTime({ cur: a.currentTime, dur: Number.isFinite(a.duration) ? a.duration : 0 })
+        }}
+        onEnded={e => {
+          if (isFixingDuration(e.currentTarget)) return
+          if (hasNext) onIndex(index + 1)
+          else setPlaying(false)
+        }}
         onError={() => hasNext && onIndex(index + 1)}
       />
       <input type="range" className="player-seek" min={0} max={1000} value={progress} onChange={seek}
