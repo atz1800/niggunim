@@ -1,8 +1,27 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /users/{uid}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+    match /users/{uid}/niggunim/{niggunId} {
+      allow read, delete: if isOwner(uid);
+      allow create, update: if isOwner(uid) && validNiggun(request.resource.data);
+    }
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // שדה אופציונלי: חסר / null (רשומות ישנות) / מחרוזת עד max תווים
+    function optString(d, field, max) {
+      return !(field in d) || d[field] == null || (d[field] is string && d[field].size() <= max);
+    }
+
+    function validNiggun(d) {
+      return d.name is string && d.name.size() > 0 && d.name.size() <= 200
+        && optString(d, 'chords', 5000)
+        && optString(d, 'story', 50000)
+        && optString(d, 'mood', 50)
+        && optString(d, 'hebrewDate', 100)
+        && (!('audioFiles' in d) || (d.audioFiles is list && d.audioFiles.size() <= 50));
     }
   }
 }

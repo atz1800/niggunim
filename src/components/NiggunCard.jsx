@@ -1,11 +1,15 @@
-import React from 'react'
+import { getAudioFiles } from '../lib/audio'
 
-export default function NiggunCard({ niggun, onClick }) {
-  const audioCount = niggun.audioFiles?.length || (niggun.audioUrl ? 1 : 0)
-  const hasAudio = audioCount > 0
+export default function NiggunCard({ niggun, onOpen }) {
+  const audioCount = getAudioFiles(niggun).length
+
+  function onKeyDown(e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() }
+  }
 
   return (
-    <div className="niggun-card" onClick={onClick}>
+    <div className="niggun-card" role="button" tabIndex={0} onClick={onOpen} onKeyDown={onKeyDown}
+      aria-label={`פתח את ${niggun.name}`}>
       <div className="card-header">
         <span className="card-name">{niggun.name}</span>
         {niggun.mood && <span className="card-mood">{niggun.mood}</span>}
@@ -16,22 +20,17 @@ export default function NiggunCard({ niggun, onClick }) {
       )}
 
       {niggun.chords && (
-        <div className="card-chords">🎸 {niggun.chords}</div>
+        <div className="card-chords" dir="ltr">🎸 {niggun.chords}</div>
       )}
 
       {niggun.story && (
         <div className="card-story">{niggun.story}</div>
       )}
 
-      {hasAudio && (
+      {audioCount > 0 && (
         <div className="card-audio-row">
-          <button
-            className="card-play-btn"
-            title="לחץ לשמיעה"
-            onClick={e => { e.stopPropagation(); onClick() }}
-          >
-            ▶
-          </button>
+          {/* כל הכרטיס לחיץ — הסמל דקורטיבי בלבד (אין כפתור מקונן בתוך role=button) */}
+          <span className="card-play-btn" aria-hidden="true">▶</span>
           <span className="card-audio-label">
             {audioCount > 1 ? `${audioCount} הקלטות` : 'הקלטה'}
           </span>

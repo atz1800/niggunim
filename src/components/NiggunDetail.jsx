@@ -1,20 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react'
-import { doc, updateDoc, deleteDoc, runTransaction } from 'firebase/firestore'
+import { useState, useEffect, useRef } from 'react'
+import { doc, updateDoc, runTransaction } from 'firebase/firestore'
 import { db } from '../firebase'
-import { uploadToStorage } from '../utils/storageUpload'
+import { uploadToStorage, deleteStorageFiles } from '../utils/storageUpload'
+import { getAudioFiles, isDriveUrl } from '../lib/audio'
+import { useAudioUploads } from '../hooks/useAudioUploads'
 import ShareButton from './ShareButton'
-
-const MOODS = ['שבת', 'שמח', 'עצוב', 'מהיר', 'איטי', 'דבקות', 'תפילה', 'אחר']
-
-function getAudioFiles(niggun) {
-  if (niggun.audioFiles && niggun.audioFiles.length > 0) return niggun.audioFiles
-  if (niggun.audioUrl) return [{ url: niggun.audioUrl, name: niggun.audioFileName || 'הקלטה' }]
-  return []
-}
-
-function isDriveUrl(url) {
-  return url?.includes('drive.google.com') || url?.includes('googleapis.com/drive')
-}
+import NiggunFormFields from './NiggunFormFields'
+import FileUploadList from './FileUploadList'
+import AudioDropZone from './AudioDropZone'
 
 // עדכון אטומי ב-Firestore — transaction מונע race condition כשכמה קבצים מגרים במקביל
 async function migrateUrlInFirestore(oldUrl, newUrl, uid, niggunId) {
@@ -23,7 +16,7 @@ async function migrateUrlInFirestore(oldUrl, newUrl, uid, niggunId) {
     const snap = await tx.get(ref)
     if (!snap.exists()) return
     const data = snap.data()
-    const audioFiles = (data.audioFiles || []).map(f =>
+    const audioFiles = getAudioFiles(data).map(f =>
       f.url === oldUrl ? { ...f, url: newUrl } : f
     )
     const updates = { audioFiles }
@@ -32,92 +25,86 @@ async function migrateUrlInFirestore(oldUrl, newUrl, uid, niggunId) {
   })
 }
 
-async function fetchFromDrive(driveId, token) {
+function fetchFromDrive(driveId, token) {
   return fetch(
     `https://www.googleapis.com/drive/v3/files/${driveId}?alt=media`,
     { headers: { Authorization: `Bearer ${token}` } }
   )
 }
 
+const driveIdOf = url => url?.match(/[?&]id=([^&]+)/)?.[1]
+
 /**
  * נגן אודיו הרמטי:
  * - Firebase Storage URL → מנגן ישירות, לא פג לעולם
- * - Drive URL + טוקן זמין → מיגרציה אוטומטית שקטה לStorage, מעדכן Firestore
+ * - Drive URL + טוקן זמין → מיגרציה אוטומטית שקטה ל-Storage, מעדכן Firestore
  * - Drive URL + אין טוקן → כפתור "העבר" מפורש (לא popup ספונטני)
  * - אחרי מיגרציה אחת — Storage לצמיתות, Drive לא עוד
  */
 function AudioPlayer({ audioFile, uid, niggunId, getDriveToken }) {
-  const { name } = audioFile
-  const [currentUrl, setCurrentUrl] = useState(audioFile.url)
-  const [migrating, setMigrating] = useState(false)
-  const [needsAuth, setNeedsAuth] = useState(false)
-  const [failed, setFailed] = useState(false)
-  const migratedRef = useRef(false)
-
-  useEffect(() => {
-    if (!isDriveUrl(currentUrl) || migratedRef.current) return
-    migratedRef.current = true
-    const token = localStorage.getItem('driveToken')
-    if (token) {
-      runMigration(token) // טוקן קיים → מגר בשקט
-    } else {
-      setNeedsAuth(true)  // אין טוקן → הצג כפתור, לא popup
-    }
-  }, [])
+  const { name, url } = audioFile
+  const [status, setStatus] = useState(() => isDriveUrl(url) ? 'pending' : 'ready')
+  const started = useRef(false)
 
   async function runMigration(token) {
-    setMigrating(true)
-    setNeedsAuth(false)
+    setStatus('migrating')
     try {
-      const driveId = currentUrl.match(/[?&]id=([^&]+)/)?.[1]
+      const driveId = driveIdOf(url)
       if (!driveId) throw new Error('NO_ID')
 
       let res = await fetchFromDrive(driveId, token)
       if (res.status === 401) {
         // רענן טוקן — popup אחד בלבד אם הכרחי
-        const fresh = await getDriveToken(true)
+        const fresh = await getDriveToken({ force: true })
         if (!fresh) throw new Error('NO_TOKEN')
         res = await fetchFromDrive(driveId, fresh)
       }
       if (!res.ok) throw new Error(`DOWNLOAD_FAILED:${res.status}`)
 
       const blob = await res.blob()
-      const mime = (blob.type && blob.type !== 'application/octet-stream')
-        ? blob.type : 'audio/mpeg'
-      const file = new File([blob], name || 'recording', { type: mime })
-
-      const { url: newUrl } = await uploadToStorage(file, uid, () => {})
-      await migrateUrlInFirestore(currentUrl, newUrl, uid, niggunId)
-      setCurrentUrl(newUrl)
+      const file = new File([blob], name || 'recording', {
+        type: blob.type?.startsWith('audio/') ? blob.type : '',
+      })
+      const { url: newUrl } = await uploadToStorage(file, uid)
+      // העדכון ב-Firestore יגיע בחזרה דרך onSnapshot, והנגן יתחלף ל-URL החדש
+      await migrateUrlInFirestore(url, newUrl, uid, niggunId)
     } catch (err) {
       console.warn('Migration failed:', err.message)
-      setFailed(true)
-    } finally {
-      setMigrating(false)
+      setStatus('failed')
     }
   }
 
+  useEffect(() => {
+    if (status !== 'pending' || started.current) return
+    started.current = true
+    getDriveToken({ interactive: false }).then(token => {
+      if (token) runMigration(token) // טוקן קיים → מגר בשקט
+      else setStatus('needsAuth')    // אין טוקן → הצג כפתור, לא popup
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   async function handleMigrateClick() {
-    setNeedsAuth(false)
-    const token = await getDriveToken()
+    const token = await getDriveToken({ force: true })
     if (token) runMigration(token)
-    else setFailed(true)
+    else setStatus('failed')
   }
 
-  if (migrating) return (
-    <div className="drive-loading">🔄 מעביר לאחסון קבוע... (פעם אחת בלבד)</div>
+  if (status === 'pending' || status === 'migrating') return (
+    <div className="drive-loading" role="status">🔄 מעביר לאחסון קבוע... (פעם אחת בלבד)</div>
   )
 
-  if (needsAuth) return (
-    <button className="btn-migrate" onClick={handleMigrateClick}>
+  if (status === 'needsAuth') return (
+    <button type="button" className="btn-migrate" onClick={handleMigrateClick}>
       🔒 הפעל הקלטה — העברה חד-פעמית לאחסון קבוע
     </button>
   )
 
-  if (failed) {
-    const driveId = audioFile.url?.match(/[?&]id=([^&]+)/)?.[1]
+  if (status === 'failed') {
+    const driveId = driveIdOf(url)
+    if (!driveId) return <div className="drive-loading">⚠️ לא ניתן לנגן את ההקלטה</div>
     return (
-      <a href={driveId ? `https://drive.google.com/file/d/${driveId}/view` : '#'}
+      <a href={`https://drive.google.com/file/d/${driveId}/view`}
          target="_blank" rel="noreferrer" className="drive-open-link">
         🔗 פתח ב-Google Drive
       </a>
@@ -126,228 +113,160 @@ function AudioPlayer({ audioFile, uid, niggunId, getDriveToken }) {
 
   return (
     <div dir="ltr">
-      <audio controls className="audio-player" src={currentUrl}
-             onError={() => setFailed(true)} />
+      <audio controls preload="metadata" className="audio-player" src={url}
+             aria-label={name || 'הקלטה'} onError={() => setStatus('failed')} />
     </div>
   )
 }
 
-let nextId = 100
-
-export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpdated, onDeleted }) {
-  const [editing, setEditing] = useState(false)
-  const [form, setForm] = useState({
+function formFrom(niggun) {
+  return {
     name: niggun.name || '',
     chords: niggun.chords || '',
     story: niggun.story || '',
     mood: niggun.mood || '',
     hebrewDate: niggun.hebrewDate || '',
-  })
-  const [existingFiles, setExistingFiles] = useState(getAudioFiles(niggun))
-  const [newFiles, setNewFiles] = useState([])
-  const [saving, setSaving] = useState(false)
-  const [confirmDelete, setConfirmDelete] = useState(false)
-  const [error, setError] = useState('')
-  const fileInputRef = useRef()
+  }
+}
 
-  const uploading = newFiles.some(f => f.status === 'uploading')
+function EditNiggun({ niggun, uid, onCancel, onSaved, onSaveError }) {
+  // מאותחל מהגרסה העדכנית ביותר של הניגון ברגע הכניסה לעריכה
+  const [form, setForm] = useState(() => formFrom(niggun))
+  const [existingFiles, setExistingFiles] = useState(() => getAudioFiles(niggun))
+  const [error, setError] = useState('')
+  const uploads = useAudioUploads(uid, setError)
 
   function handleChange(e) {
     setForm(f => ({ ...f, [e.target.name]: e.target.value }))
   }
 
-  function handleNewFilesSelect(rawFiles) {
-    const valid = Array.from(rawFiles).filter(f =>
-      f.type.startsWith('audio/') || /\.(mp3|m4a|wav|ogg|aac|flac|wma|opus|webm)$/i.test(f.name)
-    )
-    const entries = valid.map(file => ({
-      id: nextId++, file, status: 'uploading', progress: 0, result: null
-    }))
-    setNewFiles(prev => [...prev, ...entries])
-    entries.forEach(entry => startUpload(entry))
+  function handleCancel() {
+    uploads.discard()
+    onCancel()
   }
 
-  async function startUpload(entry) {
-    try {
-      const result = await uploadToStorage(entry.file, uid, (progress) => {
-        setNewFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress } : f))
-      })
-      setNewFiles(prev => prev.map(f => f.id === entry.id
-        ? { ...f, status: 'done', progress: 100, result }
-        : f
-      ))
-    } catch (err) {
-      setNewFiles(prev => prev.map(f => f.id === entry.id ? { ...f, status: 'error' } : f))
-      setError('שגיאת העלאה: ' + err.message)
-    }
-  }
-
-  function removeExistingFile(idx) {
-    setExistingFiles(prev => prev.filter((_, i) => i !== idx))
-  }
-
-  function removeNewFile(id) {
-    setNewFiles(prev => prev.filter(f => f.id !== id))
-  }
-
-  async function handleSave() {
+  function handleSave(e) {
+    e.preventDefault()
     if (!form.name.trim()) { setError('שם הניגון חובה'); return }
-    setSaving(true)
-    setError('')
-    try {
-      const uploadedNew = newFiles.filter(f => f.status === 'done').map(f => f.result)
-      const allAudioFiles = [...existingFiles, ...uploadedNew]
-      const updates = {
-        ...form,
-        audioFiles: allAudioFiles,
-        audioUrl: allAudioFiles[0]?.url || '',
-        audioFileName: allAudioFiles[0]?.name || '',
-      }
-      await updateDoc(doc(db, 'users', uid, 'niggunim', niggun.id), updates)
-      onUpdated({ ...niggun, ...updates })
-      setEditing(false)
-      setNewFiles([])
-    } catch (err) {
-      setError('שגיאה: ' + err.message)
-    } finally {
-      setSaving(false)
-    }
+    const added = uploads.done
+    const allAudioFiles = [...existingFiles, ...added]
+    const keptUrls = new Set(allAudioFiles.map(f => f.url))
+    const removed = getAudioFiles(niggun).map(f => f.url).filter(u => !keptUrls.has(u))
+    // כתיבה אופטימית (ראה AddNiggun) — המסך מתעדכן מיד מהמטמון המקומי
+    updateDoc(doc(db, 'users', uid, 'niggunim', niggun.id), {
+      name: form.name.trim(),
+      chords: form.chords.trim(),
+      story: form.story.trim(),
+      mood: form.mood,
+      hebrewDate: form.hebrewDate.trim(),
+      audioFiles: allAudioFiles,
+      audioUrl: allAudioFiles[0]?.url || '',
+      audioFileName: allAudioFiles[0]?.name || '',
+    }).then(() => {
+      // הקלטות שהוסרו נמחקות מ-Storage רק אחרי שהשרת אישר את השמירה
+      if (removed.length) deleteStorageFiles(removed)
+    }).catch(err => {
+      deleteStorageFiles(added.map(f => f.url))
+      onSaveError('שגיאה בשמירת השינויים: ' + (err.code || err.message))
+    })
+    uploads.commit()
+    onSaved()
   }
 
-  async function handleDelete() {
-    try {
-      await deleteDoc(doc(db, 'users', uid, 'niggunim', niggun.id))
-      onDeleted(niggun.id)
-    } catch (err) {
-      setError('שגיאה במחיקה: ' + err.message)
-    }
-  }
+  return (
+    <form onSubmit={handleSave} noValidate>
+      <div className="detail-header">
+        <button type="button" className="detail-back" onClick={handleCancel} aria-label="חזרה בלי לשמור">←</button>
+        <h1 className="detail-name">✏️ עריכת ניגון</h1>
+      </div>
 
-  const displayAudioFiles = getAudioFiles(niggun)
+      <NiggunFormFields form={form} onChange={handleChange} storyRows={5} />
+
+      <div className="form-group">
+        <span className="form-label">הקלטות קיימות</span>
+        {existingFiles.length === 0 ? (
+          <p className="muted-text">אין הקלטות</p>
+        ) : (
+          <ul className="audio-files-list">
+            {existingFiles.map((f, i) => (
+              <li key={f.url || i} className="audio-file-item done">
+                <span className="audio-file-name">🎵 {f.name || `הקלטה ${i + 1}`}</span>
+                <button type="button" className="remove-file-btn"
+                  onClick={() => setExistingFiles(prev => prev.filter((_, j) => j !== i))}
+                  aria-label={`הסר ${f.name || `הקלטה ${i + 1}`}`}>✕ הסר</button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="form-group">
+        <span className="form-label">הוסף הקלטות</span>
+        <AudioDropZone onFiles={uploads.add}>
+          🎵 גרור לכאן או <strong>לחץ להוספת קבצים</strong> — יעלו מיד
+        </AudioDropZone>
+        <FileUploadList files={uploads.files} onRemove={uploads.remove} />
+        {uploads.uploading && <div className="upload-status-msg" role="status">⏳ מעלה קבצים... יש להמתין</div>}
+      </div>
+
+      {error && <div className="form-error" role="alert">⚠️ {error}</div>}
+
+      <div className="form-actions">
+        <button type="button" className="btn btn-secondary" onClick={handleCancel}>ביטול</button>
+        <button type="submit" className="btn btn-primary" disabled={uploads.uploading}>
+          {uploads.uploading ? '⏳ ממתין להעלאה...' : '💾 שמור'}
+        </button>
+      </div>
+    </form>
+  )
+}
+
+export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpdated, onDelete, onSaveError }) {
+  const [editing, setEditing] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
 
   if (editing) {
     return (
-      <div>
-        <div className="detail-header">
-          <button className="detail-back" onClick={() => setEditing(false)}>←</button>
-          <h1 className="detail-name">✏️ עריכת ניגון</h1>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">שם הניגון *</label>
-          <input className="form-input" name="name" value={form.name} onChange={handleChange} />
-        </div>
-        <div className="form-group">
-          <label className="form-label">אקורדים</label>
-          <input className="form-input" name="chords" value={form.chords} onChange={handleChange} dir="ltr" />
-        </div>
-        <div className="form-group">
-          <label className="form-label">מצב רוח</label>
-          <select className="form-input filter-select" name="mood" value={form.mood}
-            onChange={handleChange} style={{ width: '100%' }}>
-            <option value="">— בחר —</option>
-            {MOODS.map(m => <option key={m} value={m}>{m}</option>)}
-          </select>
-        </div>
-        <div className="form-group">
-          <label className="form-label">תאריך עברי</label>
-          <input className="form-input" name="hebrewDate" value={form.hebrewDate} onChange={handleChange} />
-        </div>
-        <div className="form-group">
-          <label className="form-label">סיפור</label>
-          <textarea className="form-input" name="story" value={form.story} onChange={handleChange} rows={5} />
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">הקלטות קיימות</label>
-          {existingFiles.length === 0 ? (
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>אין הקלטות</p>
-          ) : (
-            <div className="audio-files-list">
-              {existingFiles.map((f, i) => (
-                <div key={i} className="audio-file-item done">
-                  <span className="audio-file-name">✅ {f.name}</span>
-                  <button type="button" className="remove-file-btn" onClick={() => removeExistingFile(i)}>✕ הסר</button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">הוסף הקלטות</label>
-          <div className="audio-upload" onClick={() => fileInputRef.current.click()}>
-            <input ref={fileInputRef} type="file" accept="audio/*,.aac,.mp3,.m4a,.wav,.ogg,.flac,.wma,.opus" multiple
-              onChange={e => handleNewFilesSelect(e.target.files)} />
-            <div className="audio-upload-text">🎵 <strong>לחץ להוספת קבצים</strong> — יעלו מיד</div>
-          </div>
-          {newFiles.length > 0 && (
-            <div className="audio-files-list" style={{ marginTop: 8 }}>
-              {newFiles.map(f => (
-                <div key={f.id} className={`audio-file-item ${f.status}`}>
-                  <span className="audio-file-name">
-                    {f.status === 'uploading' ? '⏫' : f.status === 'done' ? '✅' : '❌'} {f.file.name}
-                  </span>
-                  <div className="audio-file-right">
-                    {f.status === 'uploading' && (
-                      <div className="upload-progress-wrapper">
-                        <div className="file-progress-bar">
-                          <div className="file-progress-fill" style={{ width: `${f.progress}%` }} />
-                        </div>
-                        <span className="file-progress-text">{f.progress}%</span>
-                      </div>
-                    )}
-                    {f.status !== 'uploading' && (
-                      <button type="button" className="remove-file-btn" onClick={() => removeNewFile(f.id)}>✕</button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-          {uploading && <div className="upload-status-msg">⏳ מעלה קבצים... יש להמתין</div>}
-        </div>
-
-        {error && <div style={{ color: 'var(--danger)', marginBottom: 12 }}>⚠️ {error}</div>}
-
-        <div className="form-actions">
-          <button className="btn btn-secondary" onClick={() => setEditing(false)} disabled={saving}>ביטול</button>
-          <button className="btn btn-primary" onClick={handleSave} disabled={saving || uploading}>
-            {saving ? '💾 שומר...' : uploading ? '⏳ ממתין להעלאה...' : '💾 שמור'}
-          </button>
-        </div>
-      </div>
+      <EditNiggun
+        niggun={niggun}
+        uid={uid}
+        onCancel={() => setEditing(false)}
+        onSaved={() => { setEditing(false); onUpdated() }}
+        onSaveError={onSaveError}
+      />
     )
   }
+
+  const audioFiles = getAudioFiles(niggun)
 
   return (
     <div>
       <div className="detail-header">
-        <button className="detail-back" onClick={onBack}>←</button>
+        <button type="button" className="detail-back" onClick={onBack} aria-label="חזרה לרשימה">←</button>
         <h1 className="detail-name">{niggun.name}</h1>
       </div>
 
       <div className="detail-meta">
         {niggun.mood && <span className="meta-chip mood">🎭 {niggun.mood}</span>}
         {niggun.hebrewDate && <span className="meta-chip">📅 {niggun.hebrewDate}</span>}
-        {displayAudioFiles.length > 0 && (
-          <span className="meta-chip">🎵 {displayAudioFiles.length > 1 ? `${displayAudioFiles.length} הקלטות` : 'הקלטה'}</span>
+        {audioFiles.length > 0 && (
+          <span className="meta-chip">🎵 {audioFiles.length > 1 ? `${audioFiles.length} הקלטות` : 'הקלטה'}</span>
         )}
       </div>
 
       {niggun.chords && (
-        <div className="detail-section">
-          <div className="detail-section-label">אקורדים</div>
+        <section className="detail-section">
+          <h2 className="detail-section-label">אקורדים</h2>
           <div className="detail-chords" dir="ltr">{niggun.chords}</div>
-        </div>
+        </section>
       )}
 
-      {displayAudioFiles.length > 0 && (
-        <div className="detail-section">
-          <div className="detail-section-label">הקלטות</div>
+      {audioFiles.length > 0 && (
+        <section className="detail-section">
+          <h2 className="detail-section-label">הקלטות</h2>
           <div className="audio-players-list">
-            {displayAudioFiles.map((f, i) => (
-              <div key={i} className="audio-player-item">
+            {audioFiles.map((f, i) => (
+              <div key={f.url || i} className="audio-player-item">
                 <div className="audio-player-name">🎵 {f.name || `הקלטה ${i + 1}`}</div>
                 <AudioPlayer
                   audioFile={f}
@@ -358,29 +277,27 @@ export default function NiggunDetail({ niggun, uid, getDriveToken, onBack, onUpd
               </div>
             ))}
           </div>
-        </div>
+        </section>
       )}
 
       {niggun.story && (
-        <div className="detail-section">
-          <div className="detail-section-label">סיפור הניגון</div>
+        <section className="detail-section">
+          <h2 className="detail-section-label">סיפור הניגון</h2>
           <div className="detail-story">{niggun.story}</div>
-        </div>
+        </section>
       )}
 
-      {error && <div style={{ color: 'var(--danger)', marginBottom: 12 }}>⚠️ {error}</div>}
-
       <div className="detail-actions">
-        <button className="btn btn-secondary" onClick={() => setEditing(true)}>✏️ ערוך</button>
+        <button type="button" className="btn btn-secondary" onClick={() => setEditing(true)}>✏️ ערוך</button>
         <ShareButton niggun={niggun} />
         {confirmDelete ? (
           <>
-            <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem', alignSelf: 'center' }}>בטוח למחוק?</span>
-            <button className="btn btn-danger" onClick={handleDelete}>מחק</button>
-            <button className="btn btn-secondary" onClick={() => setConfirmDelete(false)}>ביטול</button>
+            <span className="muted-text confirm-text">בטוח למחוק?</span>
+            <button type="button" className="btn btn-danger" onClick={() => onDelete(niggun)}>מחק</button>
+            <button type="button" className="btn btn-secondary" onClick={() => setConfirmDelete(false)}>ביטול</button>
           </>
         ) : (
-          <button className="btn btn-danger" onClick={() => setConfirmDelete(true)}>🗑️ מחק</button>
+          <button type="button" className="btn btn-danger" onClick={() => setConfirmDelete(true)}>🗑️ מחק</button>
         )}
       </div>
     </div>

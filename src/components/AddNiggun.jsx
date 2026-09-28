@@ -1,9 +1,12 @@
-import React, { useState, useRef } from 'react'
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore'
+import { useState } from 'react'
+import { collection, doc, setDoc, serverTimestamp } from 'firebase/firestore'
 import { db } from '../firebase'
-import { uploadToStorage } from '../utils/storageUpload'
-
-const MOODS = ['שבת', 'שמח', 'עצוב', 'מהיר', 'איטי', 'דבקות', 'תפילה', 'אחר']
+import { useAudioUploads } from '../hooks/useAudioUploads'
+import { deleteStorageFiles } from '../utils/storageUpload'
+import Modal from './Modal'
+import NiggunFormFields from './NiggunFormFields'
+import FileUploadList from './FileUploadList'
+import AudioDropZone from './AudioDropZone'
 
 function getHebrewDate() {
   try {
@@ -13,208 +16,71 @@ function getHebrewDate() {
   } catch { return '' }
 }
 
-let nextId = 1
-
-export default function AddNiggun({ uid, onClose, onAdded }) {
-  const [form, setForm] = useState({
+export default function AddNiggun({ uid, onClose, onAdded, onSaveError }) {
+  const [form, setForm] = useState(() => ({
     name: '', chords: '', story: '', mood: '', hebrewDate: getHebrewDate(),
-  })
-  const [files, setFiles] = useState([])
-  const [saving, setSaving] = useState(false)
+  }))
   const [error, setError] = useState('')
-  const [dragOver, setDragOver] = useState(false)
-  const fileInputRef = useRef()
-
-  const uploading = files.some(f => f.status === 'uploading')
+  const uploads = useAudioUploads(uid, setError)
 
   function handleChange(e) {
     setForm(f => ({ ...f, [e.target.name]: e.target.value }))
   }
 
-  function handleFilesSelect(rawFiles) {
-    const allowed = /\.(mp3|m4a|wav|ogg|aac|flac|wma|opus|webm)$/i
-    const valid = Array.from(rawFiles).filter(f =>
-      f.type.startsWith('audio/') || allowed.test(f.name)
-    )
-    if (!valid.length) { setError('קבצי שמע בלבד (MP3, M4A, WAV, AAC, FLAC, OPUS ועוד)'); return }
-    setError('')
-    const entries = valid.map(file => ({
-      id: nextId++, file, status: 'uploading', progress: 0, result: null
-    }))
-    setFiles(prev => [...prev, ...entries])
-    entries.forEach(entry => startUpload(entry))
-  }
-
-  async function startUpload(entry) {
-    try {
-      const result = await uploadToStorage(entry.file, uid, (progress) => {
-        setFiles(prev => prev.map(f => f.id === entry.id ? { ...f, progress } : f))
-      })
-
-      setFiles(prev => prev.map(f => f.id === entry.id
-        ? { ...f, status: 'done', progress: 100, result }
-        : f
-      ))
-    } catch (err) {
-      setFiles(prev => prev.map(f => f.id === entry.id
-        ? { ...f, status: 'error', progress: 0 }
-        : f
-      ))
-      setError('שגיאת העלאה: ' + err.message)
-    }
-  }
-
-  function removeFile(id) {
-    setFiles(prev => prev.filter(f => f.id !== id))
-  }
-
-  async function handleSubmit(e) {
+  function handleSubmit(e) {
     e.preventDefault()
     if (!form.name.trim()) { setError('שם הניגון חובה'); return }
-    setSaving(true)
-    setError('')
-    try {
-      const audioFiles = files
-        .filter(f => f.status === 'done')
-        .map(f => f.result)
-
-      const docData = {
-        name: form.name.trim(),
-        chords: form.chords.trim(),
-        story: form.story.trim(),
-        mood: form.mood,
-        hebrewDate: form.hebrewDate.trim(),
-        audioFiles,
-        createdAt: serverTimestamp(),
-      }
-      const docRef = await addDoc(collection(db, 'users', uid, 'niggunim'), docData)
-      onAdded({ id: docRef.id, ...docData })
-      onClose()
-    } catch (err) {
-      setError('שגיאה בשמירה: ' + err.message)
-    } finally {
-      setSaving(false)
-    }
+    const audioFiles = uploads.done
+    // כתיבה אופטימית: המטמון המקומי של Firestore מציג את הניגון מיד (גם בלי רשת),
+    // וה-Promise מסתיים רק כשהשרת מאשר — לכן לא מחכים לו כדי לסגור את המודאל
+    setDoc(doc(collection(db, 'users', uid, 'niggunim')), {
+      name: form.name.trim(),
+      chords: form.chords.trim(),
+      story: form.story.trim(),
+      mood: form.mood,
+      hebrewDate: form.hebrewDate.trim(),
+      audioFiles,
+      createdAt: serverTimestamp(),
+    }).catch(err => {
+      // השרת דחה — הניגון לא נשמר, אז גם ההקלטות שלו מיותרות
+      deleteStorageFiles(audioFiles.map(f => f.url))
+      onSaveError('שגיאה בשמירת הניגון: ' + (err.code || err.message))
+    })
+    uploads.commit()
+    onAdded()
+    onClose()
   }
 
+  // קבצים שהועלו ולא נשמרו נמחקים אוטומטית כשהמודאל נסגר (useAudioUploads)
   return (
-    <div className="modal-overlay">
-      <div className="modal">
-        <button className="modal-close" onClick={onClose}>✕</button>
-        <h2 className="modal-title">➕ הוסף ניגון חדש</h2>
+    <Modal titleId="add-niggun-title" onClose={onClose}>
+      <h2 className="modal-title" id="add-niggun-title">➕ הוסף ניגון חדש</h2>
 
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label className="form-label">שם הניגון *</label>
-            <input className="form-input" name="name" value={form.name}
-              onChange={handleChange} placeholder='לדוגמא: ניגון האדמו"ר' autoFocus />
-          </div>
+      <form onSubmit={handleSubmit} noValidate>
+        <NiggunFormFields form={form} onChange={handleChange} autoFocus />
 
-          <div className="form-group">
-            <label className="form-label">אקורדים</label>
-            <input className="form-input" name="chords" value={form.chords}
-              onChange={handleChange} placeholder="Am - G - F - E" dir="ltr" />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">מצב רוח / קטגוריה</label>
-            <select className="form-input filter-select" name="mood" value={form.mood}
-              onChange={handleChange} style={{ width: '100%' }}>
-              <option value="">— בחר —</option>
-              {MOODS.map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">תאריך עברי</label>
-            <input className="form-input" name="hebrewDate" value={form.hebrewDate}
-              onChange={handleChange} placeholder='י"ד בניסן תשפ"ה' />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">סיפור / הקשר</label>
-            <textarea className="form-input" name="story" value={form.story}
-              onChange={handleChange}
-              placeholder="מאיפה למדת את הניגון? באיזה אירוע? מה הוא מעורר בך?"
-              rows={4} />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">הקלטות — ניתן לבחור כמה קבצים</label>
-            <div
-              className={`audio-upload ${dragOver ? 'drag-over' : ''}`}
-              onClick={() => fileInputRef.current.click()}
-              onDragOver={e => { e.preventDefault(); setDragOver(true) }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={e => { e.preventDefault(); setDragOver(false); handleFilesSelect(e.dataTransfer.files) }}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="audio/*,.aac,.mp3,.m4a,.wav,.ogg,.flac,.wma,.opus"
-                multiple
-                onChange={e => handleFilesSelect(e.target.files)}
-              />
-              <div className="audio-upload-text">
-                🎵 גרור קבצים לכאן או <strong>לחץ לבחירה</strong>
-                <div style={{ fontSize: '0.8rem', marginTop: 4, opacity: 0.7 }}>
-                  MP3 / M4A / WAV — יעלה ל-Google Drive שלך אוטומטית
-                </div>
-              </div>
-            </div>
-
-            {files.length > 0 && (
-              <div className="audio-files-list">
-                {files.map(f => (
-                  <div key={f.id} className={`audio-file-item ${f.status}`}>
-                    <span className="audio-file-name">
-                      {f.status === 'uploading' && '⏫'}
-                      {f.status === 'done' && '✅'}
-                      {f.status === 'error' && '❌'}
-                      {' '}{f.file.name}
-                    </span>
-                    <div className="audio-file-right">
-                      {f.status === 'uploading' && (
-                        <div className="upload-progress-wrapper">
-                          <div className="file-progress-bar">
-                            <div className="file-progress-fill" style={{ width: `${f.progress}%` }} />
-                          </div>
-                          <span className="file-progress-text">{f.progress}%</span>
-                        </div>
-                      )}
-                      {f.status === 'done' && (
-                        <span className="file-done-label">הועלה</span>
-                      )}
-                      {f.status !== 'uploading' && (
-                        <button type="button" className="remove-file-btn" onClick={() => removeFile(f.id)}>✕</button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {uploading && (
-              <div className="upload-status-msg">⏳ מעלה ל-Google Drive... יש להמתין לפני השמירה</div>
-            )}
-          </div>
-
-          {error && (
-            <div style={{ color: 'var(--danger)', fontSize: '0.9rem', marginBottom: 12 }}>
-              ⚠️ {error}
-            </div>
+        <div className="form-group">
+          <span className="form-label">הקלטות — ניתן לבחור כמה קבצים</span>
+          <AudioDropZone onFiles={uploads.add}>
+            🎵 גרור קבצים לכאן או <strong>לחץ לבחירה</strong>
+          </AudioDropZone>
+          <FileUploadList files={uploads.files} onRemove={uploads.remove} />
+          {uploads.uploading && (
+            <div className="upload-status-msg" role="status">⏳ מעלה הקלטות... יש להמתין לפני השמירה</div>
           )}
+        </div>
 
-          <div className="form-actions">
-            <button type="button" className="btn btn-secondary" onClick={onClose} disabled={saving}>
-              ביטול
-            </button>
-            <button type="submit" className="btn btn-primary" disabled={saving || uploading}>
-              {saving ? '💾 שומר...' : uploading ? '⏳ ממתין להעלאה...' : '💾 שמור ניגון'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+        {error && <div className="form-error" role="alert">⚠️ {error}</div>}
+
+        <div className="form-actions">
+          <button type="button" className="btn btn-secondary" onClick={onClose}>
+            ביטול
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={uploads.uploading}>
+            {uploads.uploading ? '⏳ ממתין להעלאה...' : '💾 שמור ניגון'}
+          </button>
+        </div>
+      </form>
+    </Modal>
   )
 }
