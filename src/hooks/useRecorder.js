@@ -43,6 +43,7 @@ export function useRecorder({ onDone, onError }) {
   const startedAt = useRef(0)
   const accumulated = useRef(0)
   const discardNext = useRef(false)
+  const durationMs = useRef(0)
   const cbs = useRef({ onDone, onError })
   useEffect(() => { cbs.current = { onDone, onError } })
 
@@ -100,12 +101,19 @@ export function useRecorder({ onDone, onError }) {
     const recorder = new MediaRecorder(stream.current, mimeType ? { mimeType, audioBitsPerSecond: 128000 } : undefined)
     chunks.current = []
     recorder.ondataavailable = e => { if (e.data.size) chunks.current.push(e.data) }
-    recorder.onstop = () => {
+    recorder.onstop = async () => {
       const type = recorder.mimeType || mimeType || 'audio/webm'
-      const blob = new Blob(chunks.current, { type })
+      let blob = new Blob(chunks.current, { type })
       chunks.current = []
       rec.current = null
       if (discardNext.current || !blob.size) { discardNext.current = false; return }
+      // Chrome כותב webm בלי אורך — בלי זה הנגן לא מציג משך ולא מאפשר לקפוץ בהקלטה
+      if (type.includes('webm')) {
+        try {
+          const { default: fixWebmDuration } = await import('fix-webm-duration')
+          blob = await fixWebmDuration(blob, durationMs.current, { logger: false })
+        } catch { /* ההקלטה תקינה גם בלי התיקון */ }
+      }
       const file = new File([blob], `הקלטה_${stamp()}.${extFor(type)}`, { type: type.split(';')[0] })
       cbs.current.onDone?.(file)
     }
@@ -149,6 +157,7 @@ export function useRecorder({ onDone, onError }) {
 
   function stop() {
     if (!rec.current) return
+    durationMs.current = accumulated.current + (rec.current.state === 'recording' ? Date.now() - startedAt.current : 0)
     rec.current.stop()
     cleanup()
     setState('idle')
